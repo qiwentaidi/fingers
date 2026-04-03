@@ -3,6 +3,8 @@ package fingers
 import (
 	"context"
 	"fmt"
+
+	"github.com/qiwentaidi/fingers/internal/logger"
 )
 
 func NewScanner(options Options) (*FingerScanner, error) {
@@ -30,6 +32,9 @@ func NewScanner(options Options) (*FingerScanner, error) {
 	scanner := newFingerScanner(options, fingerprintRepo, faviconStore, screenshotStore)
 	if scanner == nil {
 		return nil, fmt.Errorf("no valid targets configured")
+	}
+	if !options.DisableDefaultOutput {
+		logger.Default.Info("fingerprint repository fingersized")
 	}
 	return scanner, nil
 }

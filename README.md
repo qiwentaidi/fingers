@@ -60,6 +60,7 @@ engine, err := fingers.NewFingersEngine(
     fingers.WithFingerprintFile("/path/to/finger.yaml"),
     fingers.WithThread(30),
     fingers.WithDeepScan(true),
+    fingers.WithDefaultOutput(false),
     fingers.WithAssetStorage(fingers.AssetStorageConfig{
         Mode: fingers.StorageModeLocal,
         Local: &fingers.LocalStorageConfig{
@@ -75,6 +76,8 @@ engine, err := fingers.NewFingersEngine(
 err = engine.Scan(ctx, func(result fingers.Result) {
     fmt.Println(result.URL, result.Fingerprints)
 })
+
+// 保留 callback，自行处理输出时，建议关闭 SDK 默认扫描日志。
 ```
 
 ## 规则来源配置

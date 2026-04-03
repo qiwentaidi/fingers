@@ -127,6 +127,13 @@ func WithAssetTagProbe(enabled bool) FingersSDKOptions {
 	}
 }
 
+func WithDefaultOutput(enabled bool) FingersSDKOptions {
+	return func(opts *root.Options) error {
+		opts.DisableDefaultOutput = !enabled
+		return nil
+	}
+}
+
 func WithFingerprintBytes(data []byte) FingersSDKOptions {
 	return func(opts *root.Options) error {
 		opts.FingerprintData = append([]byte(nil), data...)
@@ -197,12 +204,4 @@ func joinStorageURL(base string, suffix string) string {
 		return ""
 	}
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
-}
-
-func PackFingerprintYAML(raw []byte, password string) ([]byte, error) {
-	return root.PackFingerprintYAML(raw, password)
-}
-
-func UnpackFingerprintBundle(blob []byte, password string) ([]byte, error) {
-	return root.UnpackFingerprintBundle(blob, password)
 }

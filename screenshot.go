@@ -10,7 +10,7 @@ import (
 
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
-	"github.com/projectdiscovery/gologger"
+	"github.com/qiwentaidi/fingers/internal/logger"
 )
 
 const (
@@ -46,7 +46,7 @@ func newScreenshotAllocator(parent context.Context) (context.Context, context.Ca
 }
 
 // GetScreenshot 对指定 URL 截图并保存
-func captureScreenshot(ctx context.Context, targetURL string, store assetStore) (string, error) {
+func captureScreenshot(ctx context.Context, targetURL string, store assetStore, enableLog bool) (string, error) {
 	baseName := renameOutput(targetURL)
 	objectName := baseName + ".webp"
 
@@ -79,8 +79,8 @@ func captureScreenshot(ctx context.Context, targetURL string, store assetStore) 
 		cancelTimeout()
 		cancelBrowser()
 		cancelAllocator()
-		if err := os.RemoveAll(tempDir); err != nil {
-			gologger.Warning().Msgf("[screenshot] cleanup temp dir failed %s: %v", tempDir, err)
+		if err := os.RemoveAll(tempDir); err != nil && enableLog {
+			logger.Default.Warning("[screenshot] cleanup temp dir failed %s: %v", tempDir, err)
 		}
 
 		if lastErr == nil {
@@ -88,11 +88,13 @@ func captureScreenshot(ctx context.Context, targetURL string, store assetStore) 
 			if err != nil {
 				return "", err
 			}
-			gologger.Info().Msgf("[screenshot] captured %s -> %s", targetURL, location)
+			// gologger.Info().Msgf("[screenshot] captured %s -> %s", targetURL, location)
 			return location, nil
 		}
 
-		gologger.Warning().Msgf("[screenshot] attempt %d failed for %s: %v", attempt, targetURL, lastErr)
+		if enableLog {
+			logger.Default.Warning("[screenshot] attempt %d failed for %s: %v", attempt, targetURL, lastErr)
+		}
 		time.Sleep(1 * time.Second)
 	}
 

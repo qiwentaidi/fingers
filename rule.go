@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/Knetic/govaluate"
-	"github.com/projectdiscovery/gologger"
 	"gopkg.in/yaml.v2"
 )
 
@@ -47,6 +46,7 @@ type RuleData struct {
 type FingerprintRepository struct {
 	FingerprintDB       []FingerEntity
 	ActiveFingerprintDB []FingerEntity
+	Descriptions        map[string]string
 }
 
 func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
@@ -100,16 +100,20 @@ func BuildFingerprintRepository(fingers []FingerEntity) *FingerprintRepository {
 	copy(result, fingers)
 
 	var active []FingerEntity
+	descriptions := make(map[string]string)
 	for _, entity := range result {
 		if len(entity.Path) > 0 {
 			active = append(active, entity)
 		}
+		if _, exists := descriptions[entity.ProductName]; !exists && strings.TrimSpace(entity.Description) != "" {
+			descriptions[entity.ProductName] = entity.Description
+		}
 	}
 
-	gologger.Info().Msg("fingerprint repository fingersized")
 	return &FingerprintRepository{
 		FingerprintDB:       result,
 		ActiveFingerprintDB: active,
+		Descriptions:        descriptions,
 	}
 }
 
@@ -123,6 +127,13 @@ func (r *FingerprintRepository) GetActiveFingerprintDB() []FingerEntity {
 	result := make([]FingerEntity, len(r.ActiveFingerprintDB))
 	copy(result, r.ActiveFingerprintDB)
 	return result
+}
+
+func (r *FingerprintRepository) DescriptionByName(name string) string {
+	if r == nil {
+		return ""
+	}
+	return r.Descriptions[name]
 }
 
 func ParseRule(rule string) []RuleData {

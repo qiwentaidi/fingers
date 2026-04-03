@@ -1,0 +1,54 @@
+默认分组:
+  - name: 易软天创-禅道系统
+    description: 默认密码:admin/admin
+    path:
+      - /zentao/
+    rule:
+      - body="/zentao/user-login"
+      - body="<a id=''zentaopro'' href=''/pro/''"
+      - body="$(''#zentaopro'').addclass"
+      - body="powered by <a href=''http://www.zentao.net'' target=''_blank''>zentaopms"
+      - body="welcome to use zentao!"
+      - body="href=''/zentao/favicon.ico"
+      - title="禅道"
+      - icon_hash="53755730"
+      - body="/zt-logo.png"
+      - icon_mdhash="b1d3deb4bd16c8c1637235515deea114"
+      - body="href='/zentao/favicon.ico"
+      - body="$('#zentao').addclass('btn-success');"
+      - body="zentao/theme"
+  - name: Swagger-UI
+    path:
+      - /swagger-ui.html
+      - /;/swagger-ui.html
+      - /api/swagger-ui.html
+      - /swagger/index.html
+      - /v2/api%2Ddocs
+      - /v2/api-docs/
+      - /v3/api%2Ddocs
+      - /v3/api-docs/
+      - /swagger-resources
+    rule:
+      - body="swagger 2.0"
+      - body="swagger-ui.css"
+      - body="swaggerversion" && body="url" && body="location"
+      - body="\"openapi\":\"" && body="\"info\":"
+      - body="swagger:"
+      - body="id=\"swagger-ui"
+      - body="\"swagger\":"
+      - body="loadswaggerui"
+      - body="swagger ui"
+      - body="swagger-ui.js"
+    vuln: true
+WAF:
+  - name: 阿里云盾
+    vendor: 阿里云
+    rule:
+      - body="errors.aliyundun.net"
+      - body="error.aliyundun.com"
+      - body="errors.aliyun.net"
+      - body="errors.aliyun.com"
+      - body="error.aliyun.com"
+      - body="error.aliyun.net"
+      - body="error.aliyundun.net"
+      - body="errors.aliyundun.com"

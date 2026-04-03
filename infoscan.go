@@ -10,8 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/projectdiscovery/gologger"
 	"github.com/qiwentaidi/fingers/internal/cdncheck"
+	"github.com/qiwentaidi/fingers/internal/logger"
 
 	"github.com/qiwentaidi/clients"
 	arrayutil "github.com/qiwentaidi/utils/array"
@@ -51,6 +51,7 @@ type FingerScanner struct {
 	rootPath            bool       // 主动指纹是否采取根路径扫描
 	screenshot          bool       // 是否截屏
 	enableAssetTagProbe bool
+	enableDefaultOutput bool
 	headers             map[string]string // 请求头
 	client              *resty.Client
 	notFollowClient     *resty.Client
@@ -75,14 +76,14 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 
 		u, err := url.Parse(t)
 		if err != nil {
-			gologger.Warning().Msgf("parse url err: %v", err)
+			logger.Default.Warning("parse url err: %v", err)
 			continue
 		}
 		urls = append(urls, u)
 	}
 
 	if len(urls) == 0 {
-		gologger.Warning().Msg("No available targets found, please check input")
+		logger.Default.Warning("No available targets found, please check input")
 		return nil
 	}
 
@@ -99,11 +100,51 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		activeTimeoutLimit:      options.ActiveTimeoutLimit,
 		screenshot:              options.EnableScreenshot,
 		enableAssetTagProbe:     options.EnableAssetTagProbe,
+		enableDefaultOutput:     !options.DisableDefaultOutput,
 		faviconStore:            faviconStore,
 		screenshotStore:         screenshotStore,
 		basicURLWithFingerprint: basicURLWithFingerprint,
 		headers:                 parseHeadersToMap(options.CustomHeaders, options.Headers),
 	}
+}
+
+func (s *FingerScanner) shouldPrintDefaultOutput() bool {
+	return s != nil && s.enableDefaultOutput
+}
+
+func (s *FingerScanner) fingerprintLabel(name string) string {
+	return logger.WithDescription(name, s.fingerprintRepo.DescriptionByName(name))
+}
+
+func (s *FingerScanner) formatDefaultFingerprintOutput(pr Result) string {
+	var fingerprintDisplay []string
+	if pr.AssetTags.AssetType != "" || pr.AssetTags.ProductName != "" {
+		fingerprintDisplay = append(fingerprintDisplay, pr.AssetTags.AssetType+": "+pr.AssetTags.ProductName)
+	}
+	for _, fp := range pr.Fingerprints {
+		fingerprintDisplay = append(fingerprintDisplay, logger.Title(s.fingerprintLabel(fp)))
+	}
+	for _, fp := range pr.HighRiskFingerprints {
+		fingerprintDisplay = append(fingerprintDisplay, logger.Red(s.fingerprintLabel(fp)))
+	}
+	if len(fingerprintDisplay) == 0 {
+		fingerprintDisplay = []string{"无指纹"}
+	}
+	return strings.Join(fingerprintDisplay, " | ")
+}
+
+func (s *FingerScanner) logScanResult(scanType string, pr Result) {
+	if !s.shouldPrintDefaultOutput() {
+		return
+	}
+	logger.Default.PrintRaw("[%s] %s [%s] [%d] [%s] [%s]\n",
+		scanType,
+		pr.URL,
+		logger.ColorStatus(pr.StatusCode),
+		pr.Length,
+		pr.Title,
+		s.formatDefaultFingerprintOutput(pr),
+	)
 }
 
 // FingerScan 执行指纹扫描
@@ -118,18 +159,13 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			// 检查任务是否被取消
 			if ctrlCtx.Err() != nil {
 				// 任务已取消，停止处理结果
-				gologger.Info().Msg("指纹扫描结果处理已取消")
+				if s.shouldPrintDefaultOutput() {
+					logger.Default.Info("指纹扫描结果处理已取消")
+				}
 				break
 			}
 			if pr.StatusCode != 0 {
-				// 输出指纹信息（简化输出，移除颜色）
-				fingerprintDisplay := append(pr.Fingerprints, pr.HighRiskFingerprints...)
-				if len(fingerprintDisplay) == 0 {
-					fingerprintDisplay = []string{"无指纹"}
-				}
-				gologger.Info().Msgf("[Finger] %s [%d] [%d] [%s] [%s]", pr.URL, pr.StatusCode, pr.Length, pr.Title,
-					strings.Join(fingerprintDisplay, " | "),
-				)
+				s.logScanResult("Finger", pr)
 				// 调用回调函数前再次检查 context
 				if callback != nil && ctrlCtx.Err() == nil {
 					callback(pr)
@@ -177,7 +213,9 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 				// gologger.Debug(s.ctx, fmt.Sprintf("%s has error to 302, response headers: %s", u.String(), string(rawHeaders)))
 				statusCode = 302
 			} else {
-				gologger.Debug().Msgf("request %s error: %v", u.String(), err)
+				if s.shouldPrintDefaultOutput() {
+					logger.Default.Debug("request %s error: %v", u.String(), err)
+				}
 				return
 			}
 		}
@@ -262,8 +300,10 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 		// 截屏
 		var screenshotPath string
 		if s.screenshot && (u.Scheme == "https" || u.Scheme == "http") {
-			if screenshotPath, err = captureScreenshot(ctrlCtx, u.String(), s.screenshotStore); err != nil {
-				gologger.Warning().Msgf("%s 截屏失败: %v", u.String(), err)
+			if screenshotPath, err = captureScreenshot(ctrlCtx, u.String(), s.screenshotStore, s.shouldPrintDefaultOutput()); err != nil {
+				if s.shouldPrintDefaultOutput() {
+					logger.Default.Warning("%s 截屏失败: %v", u.String(), err)
+				}
 			}
 		}
 
@@ -338,17 +378,23 @@ func groupActiveFingerprintsByPath(fingers []FingerEntity) map[string][]FingerEn
 // ActiveFingerScan 执行主动指纹扫描
 func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCallback) {
 	if s.activeTimeoutLimit == 0 {
-		gologger.Info().Msg("ActiveTimeoutLimit is 0, skipping active fingerprint scanning")
+		if s.shouldPrintDefaultOutput() {
+			logger.Default.Info("ActiveTimeoutLimit is 0, skipping active fingerprint scanning")
+		}
 		return
 	}
 	if len(s.aliveURLs) == 0 {
-		gologger.Warning().Msg("No surviving target found, active fingerprint scanning has been skipped")
+		if s.shouldPrintDefaultOutput() {
+			logger.Default.Warning("No surviving target found, active fingerprint scanning has been skipped")
+		}
 		return
 	}
 
 	// 检查 context
 	if ctx.Err() != nil {
-		gologger.Info().Msg("主动指纹扫描已取消")
+		if s.shouldPrintDefaultOutput() {
+			logger.Default.Info("主动指纹扫描已取消")
+		}
 		return
 	}
 
@@ -363,15 +409,12 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		for pr := range retChan {
 			// 检查任务是否被取消
 			if ctx.Err() != nil {
-				gologger.Info().Msg("主动指纹扫描结果处理已取消")
+				if s.shouldPrintDefaultOutput() {
+					logger.Default.Info("主动指纹扫描结果处理已取消")
+				}
 				break
 			}
-			// 输出指纹信息（简化输出，移除颜色）
-			fingerprintDisplay := pr.Fingerprints
-			if len(fingerprintDisplay) == 0 {
-				fingerprintDisplay = []string{"无指纹"}
-			}
-			gologger.Info().Msgf("[Active] %s [%d] [%d] [%s] [%s]", pr.URL, pr.StatusCode, pr.Length, pr.Title, strings.Join(fingerprintDisplay, " | "))
+			s.logScanResult("Active", pr)
 			// 调用回调函数前检查 context
 			if callback != nil && ctx.Err() == nil {
 				callback(pr)
@@ -394,7 +437,9 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		baseURL := fp.URL.String()
 
 		if val, ok := timeoutCounter.Load(baseURL); ok && val.(int) >= s.activeTimeoutLimit {
-			gologger.Warning().Msgf("Target %s has reached the timeout limit, skipping active scan", baseURL)
+			if s.shouldPrintDefaultOutput() {
+				logger.Default.Warning("Target %s has reached the timeout limit, skipping active scan", baseURL)
+			}
 			return
 		}
 
@@ -438,8 +483,10 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			// 截屏
 			var screenshotPath string
 			if s.screenshot && (fp.URL.Scheme == "https" || fp.URL.Scheme == "http") {
-				if screenshotPath, err = captureScreenshot(ctx, fullURL, s.screenshotStore); err != nil {
-					gologger.Warning().Msgf("%s 截屏失败: %v", fp.URL.String(), err)
+				if screenshotPath, err = captureScreenshot(ctx, fullURL, s.screenshotStore, s.shouldPrintDefaultOutput()); err != nil {
+					if s.shouldPrintDefaultOutput() {
+						logger.Default.Warning("%s 截屏失败: %v", fp.URL.String(), err)
+					}
 				}
 			}
 
@@ -453,21 +500,14 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], highRiskResult...)
 			s.mutex.Unlock()
 
-			// 合并普通指纹和高危指纹（用于显示）
-			allFingerprints := []string{fp.Fpe[0].ProductName}
-			allFingerprints = append(allFingerprints, result...)
-			allFingerprints = append(allFingerprints, highRiskResult...)
-			// 去重：避免 ProductName 与 Scan 结果重复
-			allFingerprints = arrayutil.RemoveDuplicates(allFingerprints)
-
 			retChan <- Result{
 				URL:                  fullURL,
 				StatusCode:           ti.StatusCode,
 				Length:               ti.ContentLength,
 				Title:                title,
-				Fingerprints:         allFingerprints, // 主动扫描时合并显示（已去重）
-				HighRiskFingerprints: highRiskResult,  // 高危指纹（单独存储）
-				VulnFingerprints:     vulnResult,      // ⚠️ 漏洞指纹（单独存储）
+				Fingerprints:         result,         // 主动扫描时合并显示（已去重）
+				HighRiskFingerprints: highRiskResult, // 高危指纹（单独存储）
+				VulnFingerprints:     vulnResult,     // ⚠️ 漏洞指纹（单独存储）
 				Detect:               "Active",
 				Port:                 ti.Port,
 				Scheme:               fp.URL.Scheme,
@@ -484,7 +524,9 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	for _, target := range s.aliveURLs {
 		// 在外层循环检查 context
 		if ctx.Err() != nil {
-			gologger.Info().Msg("主动指纹扫描已取消，停止提交新任务")
+			if s.shouldPrintDefaultOutput() {
+				logger.Default.Info("主动指纹扫描已取消，停止提交新任务")
+			}
 			break
 		}
 
@@ -528,8 +570,14 @@ func (s *FingerScanner) ActiveCounts() int {
 }
 
 func (s *FingerScanner) IncreaseActiveProgress(id *int32, total int) {
+	if !s.shouldPrintDefaultOutput() {
+		return
+	}
 	current := atomic.AddInt32(id, 1)
-	fmt.Printf("\r[%d / %d]", current, total)
+	logger.Default.PrintRaw("\r[%d / %d]", current, total)
+	if current == int32(total) {
+		logger.Default.PrintRaw("\n")
+	}
 }
 
 func (s *FingerScanner) URLWithFingerprintMap() map[string][]string {
@@ -595,7 +643,7 @@ func Scan(web *WebInfo, targetDB []FingerEntity) ([]string, []string, []VulnFing
 
 		r, err := boolEval(expr)
 		if err != nil {
-			gologger.Warning().Msgf("[fingerprint] 错误指纹: %v", finger.AllString)
+			logger.Default.Warning("[fingerprint] 错误指纹: %v", finger.AllString)
 			continue
 		}
 		if r {
