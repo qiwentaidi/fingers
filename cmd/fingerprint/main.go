@@ -40,9 +40,9 @@ func main() {
 		BuiltinFingerprintOption(),
 		// 设置扫描线程
 		fingerssdk.WithThread(50),
-		fingerssdk.WithTargets("http://47.250.130.96/"),
+		fingerssdk.WithTargets("https://202.118.254.30/"),
 		// 开启深度扫描
-		fingerssdk.WithDeepScan(true),
+		// fingerssdk.WithDeepScan(true),
 		// 关闭网站截图
 		fingerssdk.WithScreenshot(false),
 		// 设置截图模式

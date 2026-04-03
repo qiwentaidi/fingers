@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,20 +113,28 @@ func (s *FingerScanner) shouldPrintDefaultOutput() bool {
 	return s != nil && s.enableDefaultOutput
 }
 
-func (s *FingerScanner) fingerprintLabel(name string) string {
-	return logger.WithDescription(name, s.fingerprintRepo.DescriptionByName(name))
-}
-
 func (s *FingerScanner) formatDefaultFingerprintOutput(pr Result) string {
 	var fingerprintDisplay []string
 	if pr.AssetTags.AssetType != "" || pr.AssetTags.ProductName != "" {
 		fingerprintDisplay = append(fingerprintDisplay, pr.AssetTags.AssetType+": "+pr.AssetTags.ProductName)
 	}
 	for _, fp := range pr.Fingerprints {
-		fingerprintDisplay = append(fingerprintDisplay, logger.Title(s.fingerprintLabel(fp)))
-	}
-	for _, fp := range pr.HighRiskFingerprints {
-		fingerprintDisplay = append(fingerprintDisplay, logger.Red(s.fingerprintLabel(fp)))
+		label := logger.WithDescription(fp.Name, fp.Description)
+		extractedValues := make([]string, 0, len(fp.Extractions))
+		for _, extraction := range fp.Extractions {
+			if strings.TrimSpace(extraction.Value) == "" {
+				continue
+			}
+			extractedValues = append(extractedValues, extraction.Value)
+		}
+		if len(extractedValues) > 0 {
+			label = label + " " + strings.Join(extractedValues, " ")
+		}
+		if fp.HighRisk {
+			fingerprintDisplay = append(fingerprintDisplay, logger.Red(label))
+		} else {
+			fingerprintDisplay = append(fingerprintDisplay, logger.Title(label))
+		}
 	}
 	if len(fingerprintDisplay) == 0 {
 		fingerprintDisplay = []string{"无指纹"}
@@ -282,14 +291,16 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 
 		s.aliveURLs = append(s.aliveURLs, u)
 
-		fingerprints, highRiskFingerprints, vulnFingerprints := Scan(web, s.fingerprintRepo.GetFingerprintDB())
+		fingerprints := Scan(web, s.fingerprintRepo.GetFingerprintDB())
 
 		// if s.FastjsonScan(u) {
 		// 	fingerprints = append(fingerprints, "Fastjson")
 		// }
 
 		if checkHoneypotWithHeaders(web.HeadeString) {
-			fingerprints = []string{"疑似蜜罐"}
+			fingerprints = []FingerprintMatch{{
+				Name: "疑似蜜罐",
+			}}
 		}
 
 		// 在截屏前检查 context（截屏是耗时操作）
@@ -309,24 +320,22 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 
 		s.mutex.Lock()
 		// 合并普通指纹和高危指纹（用于后续 Nuclei 扫描的标签）
-		allFingerprints := arrayutil.RemoveDuplicates(append(fingerprints, highRiskFingerprints...))
+		allFingerprints := matchedFingerprintNames(fingerprints)
 		s.basicURLWithFingerprint[u.String()] = append(s.basicURLWithFingerprint[u.String()], allFingerprints...)
 		s.mutex.Unlock()
 
 		result := Result{
-			URL:                  u.String(),
-			Scheme:               u.Scheme,
-			Host:                 u.Host,
-			Port:                 web.Port,
-			StatusCode:           web.StatusCode,
-			Length:               web.ContentLength,
-			Title:                title,
-			Fingerprints:         fingerprints,         // 普通指纹（单独存储）
-			HighRiskFingerprints: highRiskFingerprints, // 高危指纹（单独存储）
-			VulnFingerprints:     vulnFingerprints,     // ⚠️ 漏洞指纹（单独存储）
-			Detect:               "Default",
-			Screenshot:           screenshotPath,
-			Favicon:              faviconResult.FilePath, // favicon图片路径
+			URL:          u.String(),
+			Scheme:       u.Scheme,
+			Host:         u.Host,
+			Port:         web.Port,
+			StatusCode:   web.StatusCode,
+			Length:       web.ContentLength,
+			Title:        title,
+			Fingerprints: fingerprints,
+			Detect:       "Default",
+			Screenshot:   screenshotPath,
+			Favicon:      faviconResult.FilePath, // favicon图片路径
 		}
 
 		if assets != nil {
@@ -477,9 +486,9 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			Port:          httputil.GetPort(fp.URL),
 			StatusCode:    resp.StatusCode(),
 		}
-		result, highRiskResult, vulnResult := Scan(ti, fp.Fpe)
+		result := Scan(ti, fp.Fpe)
 
-		if len(result) > 0 || len(highRiskResult) > 0 || len(vulnResult) > 0 {
+		if len(result) > 0 {
 			// 截屏
 			var screenshotPath string
 			if s.screenshot && (fp.URL.Scheme == "https" || fp.URL.Scheme == "http") {
@@ -496,23 +505,20 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			}
 
 			s.mutex.Lock()
-			s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], result...)
-			s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], highRiskResult...)
+			s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], matchedFingerprintNames(result)...)
 			s.mutex.Unlock()
 
 			retChan <- Result{
-				URL:                  fullURL,
-				StatusCode:           ti.StatusCode,
-				Length:               ti.ContentLength,
-				Title:                title,
-				Fingerprints:         result,         // 主动扫描时合并显示（已去重）
-				HighRiskFingerprints: highRiskResult, // 高危指纹（单独存储）
-				VulnFingerprints:     vulnResult,     // ⚠️ 漏洞指纹（单独存储）
-				Detect:               "Active",
-				Port:                 ti.Port,
-				Scheme:               fp.URL.Scheme,
-				Host:                 fp.URL.Host,
-				Screenshot:           screenshotPath,
+				URL:          fullURL,
+				StatusCode:   ti.StatusCode,
+				Length:       ti.ContentLength,
+				Title:        title,
+				Fingerprints: result,
+				Detect:       "Active",
+				Port:         ti.Port,
+				Scheme:       fp.URL.Scheme,
+				Host:         fp.URL.Host,
+				Screenshot:   screenshotPath,
 			}
 		}
 	})
@@ -584,12 +590,99 @@ func (s *FingerScanner) URLWithFingerprintMap() map[string][]string {
 	return s.basicURLWithFingerprint
 }
 
-// Scan 扫描指纹，返回：普通指纹、高危指纹、漏洞指纹（带指纹详情）
-func Scan(web *WebInfo, targetDB []FingerEntity) ([]string, []string, []VulnFingerprint) {
-	var fingerPrintResults []string
-	var highRiskFingerPrintResults []string
-	// 用 map 去重漏洞指纹
-	vulnMap := make(map[string]VulnFingerprint)
+func extractionSourceContent(web *WebInfo, source string) string {
+	switch source {
+	case "header":
+		return web.HeadeString
+	case "body":
+		return web.BodyString
+	case "server":
+		return web.Server
+	case "title":
+		return web.Title
+	case "cert":
+		return web.Cert
+	case "path":
+		return web.Path
+	case "content_type":
+		return web.ContentType
+	case "banner":
+		return web.Banner
+	default:
+		return ""
+	}
+}
+
+func extractFingerprintValues(finger FingerEntity, web *WebInfo) []FingerprintExtraction {
+	if len(finger.Extract) == 0 || web == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	results := make([]FingerprintExtraction, 0)
+	for _, extract := range finger.Extract {
+		source := strings.ToLower(strings.TrimSpace(extract.From))
+		pattern := strings.TrimSpace(extract.Regex)
+		if source == "" || pattern == "" {
+			continue
+		}
+
+		content := extractionSourceContent(web, source)
+		if content == "" {
+			continue
+		}
+
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			logger.Default.Warning("[fingerprint] 提取规则错误 %s %s: %v", finger.ProductName, pattern, err)
+			continue
+		}
+
+		matches := re.FindAllStringSubmatch(content, -1)
+		for _, match := range matches {
+			value := ""
+			if len(match) > 1 {
+				value = strings.TrimSpace(match[1])
+			} else if len(match) > 0 {
+				value = strings.TrimSpace(match[0])
+			}
+			if value == "" {
+				continue
+			}
+
+			name := extract.Name
+			if strings.TrimSpace(name) == "" {
+				name = finger.ProductName
+			}
+
+			dedupKey := finger.ProductName + "\x00" + name + "\x00" + source + "\x00" + value
+			if _, ok := seen[dedupKey]; ok {
+				continue
+			}
+			seen[dedupKey] = struct{}{}
+			results = append(results, FingerprintExtraction{
+				Fingerprint: finger.ProductName,
+				Name:        name,
+				Source:      source,
+				Value:       value,
+			})
+		}
+	}
+
+	return results
+}
+
+func matchedFingerprintNames(fingerprints []FingerprintMatch) []string {
+	names := make([]string, 0, len(fingerprints))
+	for _, fp := range fingerprints {
+		names = append(names, fp.Name)
+	}
+	return arrayutil.RemoveDuplicates(names)
+}
+
+// Scan 扫描指纹，返回结构化指纹结果。
+func Scan(web *WebInfo, targetDB []FingerEntity) []FingerprintMatch {
+	fingerprintMap := make(map[string]*FingerprintMatch)
 
 	for _, finger := range targetDB {
 		expr := finger.AllString
@@ -647,33 +740,45 @@ func Scan(web *WebInfo, targetDB []FingerEntity) ([]string, []string, []VulnFing
 			continue
 		}
 		if r {
-			// ⚠️ 新增：如果指纹标记为 Vuln，记录到漏洞指纹列表
-			if finger.Vuln {
-				if _, exists := vulnMap[finger.ProductName]; !exists {
-					vulnMap[finger.ProductName] = VulnFingerprint{
-						Name:        finger.ProductName,
-						Description: finger.Description,
-						MatchedRule: finger.AllString,
+			match, exists := fingerprintMap[finger.ProductName]
+			if !exists {
+				match = &FingerprintMatch{
+					Name:        finger.ProductName,
+					Description: finger.Description,
+					HighRisk:    finger.HighRisk,
+					Vuln:        finger.Vuln,
+					MatchedRule: finger.AllString,
+				}
+				fingerprintMap[finger.ProductName] = match
+			}
+			if strings.TrimSpace(match.Description) == "" {
+				match.Description = finger.Description
+			}
+			match.HighRisk = match.HighRisk || finger.HighRisk
+			match.Vuln = match.Vuln || finger.Vuln
+			if match.MatchedRule == "" {
+				match.MatchedRule = finger.AllString
+			}
+			for _, extraction := range extractFingerprintValues(finger, web) {
+				seen := false
+				for _, existing := range match.Extractions {
+					if existing.Name == extraction.Name && existing.Source == extraction.Source && existing.Value == extraction.Value {
+						seen = true
+						break
 					}
 				}
-			}
-
-			// 原有逻辑：分类到普通指纹或高危指纹
-			if finger.HighRisk {
-				highRiskFingerPrintResults = append(highRiskFingerPrintResults, finger.ProductName)
-			} else {
-				fingerPrintResults = append(fingerPrintResults, finger.ProductName)
+				if !seen {
+					match.Extractions = append(match.Extractions, extraction)
+				}
 			}
 		}
 	}
 
-	// map → slice
-	vulnFingerprintResults := make([]VulnFingerprint, 0, len(vulnMap))
-	for _, v := range vulnMap {
-		vulnFingerprintResults = append(vulnFingerprintResults, v)
+	results := make([]FingerprintMatch, 0, len(fingerprintMap))
+	for _, match := range fingerprintMap {
+		results = append(results, *match)
 	}
-
-	return arrayutil.RemoveDuplicates(fingerPrintResults), arrayutil.RemoveDuplicates(highRiskFingerPrintResults), vulnFingerprintResults
+	return results
 }
 
 func (s *FingerScanner) GetJSRedirectResponse(u *url.URL, respRaw string) []byte {

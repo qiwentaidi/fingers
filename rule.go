@@ -13,13 +13,20 @@ import (
 )
 
 type Fingerprint struct {
-	Name        string   `yaml:"name"`
-	HighRisk    bool     `yaml:"high_risk,omitempty"`
-	Vendor      string   `yaml:"vendor,omitempty"`
-	Description string   `yaml:"description,omitempty"`
-	Path        []string `yaml:"path,omitempty"`
-	Rule        []string `yaml:"rule"`
-	Vuln        bool     `yaml:"vuln,omitempty"`
+	Name        string               `yaml:"name"`
+	HighRisk    bool                 `yaml:"high_risk,omitempty"`
+	Vendor      string               `yaml:"vendor,omitempty"`
+	Description string               `yaml:"description,omitempty"`
+	Path        []string             `yaml:"path,omitempty"`
+	Rule        []string             `yaml:"rule"`
+	Vuln        bool                 `yaml:"vuln,omitempty"`
+	Extract     []FingerprintExtract `yaml:"extract,omitempty"`
+}
+
+type FingerprintExtract struct {
+	Name  string `yaml:"name,omitempty"`
+	From  string `yaml:"from"`
+	Regex string `yaml:"regex"`
 }
 
 // 指纹实体
@@ -31,6 +38,7 @@ type FingerEntity struct {
 	Path        []string
 	Rule        []RuleData
 	Vuln        bool
+	Extract     []FingerprintExtract
 }
 
 type RuleData struct {
@@ -46,7 +54,6 @@ type RuleData struct {
 type FingerprintRepository struct {
 	FingerprintDB       []FingerEntity
 	ActiveFingerprintDB []FingerEntity
-	Descriptions        map[string]string
 }
 
 func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
@@ -70,6 +77,7 @@ func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
 					AllString:   rule,
 					Path:        finger.Path,
 					Vuln:        finger.Vuln,
+					Extract:     append([]FingerprintExtract(nil), finger.Extract...),
 				}
 				result = append(result, entity)
 			}
@@ -100,20 +108,15 @@ func BuildFingerprintRepository(fingers []FingerEntity) *FingerprintRepository {
 	copy(result, fingers)
 
 	var active []FingerEntity
-	descriptions := make(map[string]string)
 	for _, entity := range result {
 		if len(entity.Path) > 0 {
 			active = append(active, entity)
-		}
-		if _, exists := descriptions[entity.ProductName]; !exists && strings.TrimSpace(entity.Description) != "" {
-			descriptions[entity.ProductName] = entity.Description
 		}
 	}
 
 	return &FingerprintRepository{
 		FingerprintDB:       result,
 		ActiveFingerprintDB: active,
-		Descriptions:        descriptions,
 	}
 }
 
@@ -127,13 +130,6 @@ func (r *FingerprintRepository) GetActiveFingerprintDB() []FingerEntity {
 	result := make([]FingerEntity, len(r.ActiveFingerprintDB))
 	copy(result, r.ActiveFingerprintDB)
 	return result
-}
-
-func (r *FingerprintRepository) DescriptionByName(name string) string {
-	if r == nil {
-		return ""
-	}
-	return r.Descriptions[name]
 }
 
 func ParseRule(rule string) []RuleData {

@@ -14,23 +14,37 @@ type VulnFingerprint struct {
 	MatchedRule string
 }
 
+type FingerprintExtraction struct {
+	Fingerprint string
+	Name        string
+	Source      string
+	Value       string
+}
+
+type FingerprintMatch struct {
+	Name        string
+	Description string
+	HighRisk    bool
+	Vuln        bool
+	MatchedRule string
+	Extractions []FingerprintExtraction
+}
+
 type Result struct {
-	URL                  string
-	Scheme               string
-	Host                 string
-	Port                 int
-	StatusCode           int
-	Length               int
-	Title                string
-	Fingerprints         []string
-	HighRiskFingerprints []string
-	VulnFingerprints     []VulnFingerprint
-	AssetTags            Tag
-	IsWAF                bool
-	WAF                  string
-	Detect               string
-	Screenshot           string
-	Favicon              string
+	URL          string
+	Scheme       string
+	Host         string
+	Port         int
+	StatusCode   int
+	Length       int
+	Title        string
+	Fingerprints []FingerprintMatch
+	AssetTags    Tag
+	IsWAF        bool
+	WAF          string
+	Detect       string
+	Screenshot   string
+	Favicon      string
 }
 
 type ResultCallback func(Result)

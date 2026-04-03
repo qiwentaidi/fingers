@@ -40,7 +40,13 @@
       - body="swagger ui"
       - body="swagger-ui.js"
     vuln: true
-WAF:
+  - name: 发现供应链
+    rule:
+      - body="技术支持："
+      - body="技术支持:"
+    extract:
+      - from: body
+        regex: "技术支持\\s*[：:]?\\s*(?:<[^>]+>\\s*)*([^<\\n，。,；;：:]{2,50})"
   - name: 阿里云盾
     vendor: 阿里云
     rule:

@@ -80,6 +80,30 @@ err = engine.Scan(ctx, func(result fingers.Result) {
 // 保留 callback，自行处理输出时，建议关闭 SDK 默认扫描日志。
 ```
 
+## 提取命中内容
+
+指纹规则除了 `rule` 命中判断外，还支持 `extract` 提取匹配内容。提取只会在该指纹命中后执行。
+
+```yaml
+- name: 发现供应链
+  description: 提取页面中的供应链标识
+  rule:
+    - body="技术支持"
+  extract:
+    - name: support_text
+      from: body
+      regex: "(技术支持[^<\\n]{0,80})"
+```
+
+说明：
+
+- `from` 目前支持：`body`、`header`、`title`、`server`、`cert`、`path`、`content_type`、`banner`
+- `regex` 如果带捕获组，优先返回第一个捕获组
+- `regex` 如果不带捕获组，则返回整个命中字符串
+- 提取使用扫描阶段已经转为小写的内容源，行为与规则匹配保持一致
+
+提取结果会出现在 `result.Fingerprints[i].Extractions` 中。
+
 ## 规则来源配置
 
 SDK 支持三种配置形式：
