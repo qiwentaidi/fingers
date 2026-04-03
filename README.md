@@ -134,24 +134,3 @@ fingers.WithAssetStorage(fingers.AssetStorageConfig{
     },
 })
 ```
-
-## 对业务项目的建议
-
-如果 SDK 后续通过远程 GitHub 模块引入，业务项目自己的可编辑指纹文件不要再放在 SDK 仓库目录下读取，而应该放在业务自己的配置目录，例如：
-
-- `config/finger.yaml`
-- `/etc/your-app/finger.yaml`
-- Docker 挂载目录
-- 配置中心下发后写入本地文件
-
-然后由业务项目自己选择：
-
-- 用 `WithFingerprintFile(...)` 指向业务配置文件
-- 用 `WithFingerprintBytes(...)` 加载远端拉取后的内容
-- 用 `WithFingerprintFS(...)` 把规则编译进业务二进制
-
-对于 Hephaestus 主项目，默认规则文件现在建议放在业务仓库自己的路径中，例如：
-
-- `backend/pkg/webscan/static/finger.yaml`
-
-然后由主项目自己通过 `WithFingerprintFS(...)` 或 `WithFingerprintFile(...)` 传给 SDK，而不是由 SDK 仓库内置。
