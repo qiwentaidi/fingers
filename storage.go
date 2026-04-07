@@ -63,7 +63,7 @@ func (s *aliyunOSSStore) Save(ctx context.Context, objectName string, data []byt
 		return "", err
 	}
 	if s.publicBaseURL != "" {
-		return strings.TrimRight(s.publicBaseURL, "/") + "/" + key, nil
+		return strings.TrimRight(s.publicBaseURL, "/") + "/" + strings.TrimLeft(filepath.ToSlash(objectName), "/"), nil
 	}
 	return key, nil
 }
