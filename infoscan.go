@@ -206,7 +206,7 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 
 		// 先进行一次不会重定向的扫描，可以获得重定向前页面的响应头中获取指纹
 		resp, err := clients.DoRequest("GET", u.String(), s.headers, nil, 10, s.notFollowClient)
-		if err == nil && resp.StatusCode() == 302 {
+		if err == nil && resp.StatusCode() >= 300 && resp.StatusCode() < 400 {
 			rawHeaders = httputil.DumpResponseHeadersOnly(resp.RawResponse)
 		}
 
@@ -229,6 +229,11 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			}
 		}
 
+		finalURL := u
+		if resp != nil && resp.RawResponse != nil && resp.RawResponse.Request != nil && resp.RawResponse.Request.URL != nil {
+			finalURL = resp.RawResponse.Request.URL
+		}
+
 		body := httputil.LimitResponseBytes(resp.Body(), maxInfoReponseSize)
 		if resp != nil && resp.RawResponse != nil {
 			// 合并请求头数据, fix 0.1.0 raw.RawResponse 可能为 nil 导致的崩溃
@@ -241,13 +246,13 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 		}
 
 		// 请求Logo并保存到本地
-		faviconResult := getFaviconWithStorage(u, s.headers, s.client, s.faviconStore)
+		faviconResult := getFaviconWithStorage(finalURL, s.headers, s.client, s.faviconStore)
 
 		// 发送shiro探测
-		rawHeaders = append(rawHeaders, fmt.Appendf(nil, "Set-Cookie: %s", s.ShiroScan(u))...)
+		rawHeaders = append(rawHeaders, fmt.Appendf(nil, "Set-Cookie: %s", s.ShiroScan(finalURL))...)
 
 		// 跟随JS重定向，并替换成重定向后的数据
-		redirectBody := s.GetJSRedirectResponse(u, string(body))
+		redirectBody := s.GetJSRedirectResponse(finalURL, string(body))
 		if redirectBody != nil {
 			// JS重定向后，body数据不应该直接覆盖 fix in 2.0.8
 			body = append(body, redirectBody...)
@@ -266,13 +271,13 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 		web := &WebInfo{
 			HeadeString:   strings.ToLower(string(rawHeaders)),
 			ContentType:   strings.ToLower(contentType),
-			Cert:          strings.ToLower(GetTLSString(u.Scheme, u.Host)),
+			Cert:          strings.ToLower(GetTLSString(finalURL.Scheme, finalURL.Host)),
 			BodyString:    strings.ToLower(string(body)),
-			Path:          strings.ToLower(u.Path),
+			Path:          strings.ToLower(finalURL.Path),
 			Title:         strings.ToLower(title),
 			Server:        strings.ToLower(server),
 			ContentLength: len(resp.Body()),
-			Port:          httputil.GetPort(u),
+			Port:          httputil.GetPort(finalURL),
 			IconHash:      faviconResult.Mmh3Hash,
 			IconMd5:       faviconResult.Md5Hash,
 			StatusCode:    statusCode,
@@ -280,7 +285,7 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 
 		var assets *Tag
 		if s.enableAssetTagProbe {
-			if detected, ok := cdncheck.Detect(u.Hostname()); ok {
+			if detected, ok := cdncheck.Detect(finalURL.Hostname()); ok {
 				assets = &Tag{
 					ProductName: detected.ProductName,
 					AssetType:   detected.AssetType,
@@ -289,7 +294,7 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			}
 		}
 
-		s.aliveURLs = append(s.aliveURLs, u)
+		s.aliveURLs = append(s.aliveURLs, finalURL)
 
 		fingerprints := Scan(web, s.fingerprintRepo.GetFingerprintDB())
 
@@ -310,10 +315,10 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 
 		// 截屏
 		var screenshotPath string
-		if s.screenshot && (u.Scheme == "https" || u.Scheme == "http") {
-			if screenshotPath, err = captureScreenshot(ctrlCtx, u.String(), s.screenshotStore, s.shouldPrintDefaultOutput()); err != nil {
+		if s.screenshot && (finalURL.Scheme == "https" || finalURL.Scheme == "http") {
+			if screenshotPath, err = captureScreenshot(ctrlCtx, finalURL.String(), s.screenshotStore, s.shouldPrintDefaultOutput()); err != nil {
 				if s.shouldPrintDefaultOutput() {
-					logger.Default.Warning("%s 截屏失败: %v", u.String(), err)
+					logger.Default.Warning("%s 截屏失败: %v", finalURL.String(), err)
 				}
 			}
 		}
@@ -321,13 +326,13 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 		s.mutex.Lock()
 		// 合并普通指纹和高危指纹（用于后续 Nuclei 扫描的标签）
 		allFingerprints := matchedFingerprintNames(fingerprints)
-		s.basicURLWithFingerprint[u.String()] = append(s.basicURLWithFingerprint[u.String()], allFingerprints...)
+		s.basicURLWithFingerprint[finalURL.String()] = append(s.basicURLWithFingerprint[finalURL.String()], allFingerprints...)
 		s.mutex.Unlock()
 
 		result := Result{
-			URL:          u.String(),
-			Scheme:       u.Scheme,
-			Host:         u.Host,
+			URL:          finalURL.String(),
+			Scheme:       finalURL.Scheme,
+			Host:         finalURL.Host,
 			Port:         web.Port,
 			StatusCode:   web.StatusCode,
 			Length:       web.ContentLength,
