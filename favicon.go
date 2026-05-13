@@ -52,15 +52,9 @@ func getFaviconWithStorage(u *url.URL, headers map[string]string, client *resty.
 		return result
 	}
 	iconLink := parseIcons(doc)[0]
-	var finalLink string
-	// 如果是完整的链接，则直接请求
-	if strings.HasPrefix(iconLink, "http") {
-		finalLink = iconLink
-		// 如果为 // 开头采用与网站同协议
-	} else if strings.HasPrefix(iconLink, "//") {
-		finalLink = u.Scheme + ":" + iconLink
-	} else {
-		finalLink = fmt.Sprintf("%s://%s/%s", u.Scheme, u.Host, iconLink)
+	finalLink, err := resolveIconLink(u, iconLink)
+	if err != nil {
+		return result
 	}
 	resp, err = clients.DoRequest("GET", finalLink, headers, nil, 10, client)
 	if err == nil && resp.StatusCode() == 200 {
@@ -136,22 +130,7 @@ func GetFaviconFullLink(u *url.URL, client *resty.Client) (string, error) {
 		return "", errors.New("goquery failed to parse " + u.String() + " content")
 	}
 	iconLink := parseIcons(doc)[0]
-	var finalLink string
-	// 如果是完整的链接，则直接请求
-	if strings.HasPrefix(iconLink, "http") {
-		finalLink = iconLink
-		// 如果为 // 开头采用与网站同协议
-	} else if strings.HasPrefix(iconLink, "//") {
-		finalLink = u.Scheme + ":" + iconLink
-	} else {
-		// 传入二级路径的时，需要正确处理图标路径
-		if u.Path != "" {
-			finalLink = fmt.Sprintf("%s://%s%s/%s", u.Scheme, u.Host, u.Path, iconLink)
-		} else {
-			finalLink = fmt.Sprintf("%s://%s/%s", u.Scheme, u.Host, iconLink)
-		}
-	}
-	return finalLink, nil
+	return resolveIconLink(u, iconLink)
 }
 
 // parseIcons 解析HTML文档head中的<link>标签中rel属性包含icon信息的href链接
@@ -186,6 +165,14 @@ func parseIcons(doc *goquery.Document) []string {
 	}
 
 	return icons
+}
+
+func resolveIconLink(pageURL *url.URL, iconLink string) (string, error) {
+	ref, err := url.Parse(strings.TrimSpace(iconLink))
+	if err != nil {
+		return "", err
+	}
+	return pageURL.ResolveReference(ref).String(), nil
 }
 
 // Reference: https://github.com/Becivells/iconhash
