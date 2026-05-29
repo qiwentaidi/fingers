@@ -14,14 +14,27 @@ import (
 )
 
 const (
-	screenshotTimeout   = 30 * time.Second
-	screenshotRetryTime = 2
+	screenshotTimeout        = 30 * time.Second
+	screenshotRetryTime      = 2
+	defaultScreenshotMaxTabs = 5
 )
 
-func newScreenshotAllocator(parent context.Context) (context.Context, context.CancelFunc, string, error) {
+type screenshotBrowser struct {
+	allocCancel   context.CancelFunc
+	browserCancel context.CancelFunc
+	browserCtx    context.Context
+	tempDir       string
+	tabSlots      chan struct{}
+}
+
+func newScreenshotBrowser(parent context.Context, maxTabs int) (*screenshotBrowser, error) {
+	if maxTabs <= 0 {
+		maxTabs = 1
+	}
+
 	tempDir, err := os.MkdirTemp("", "chromedp-runner-*")
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("创建 chromedp 临时目录失败: %w", err)
+		return nil, fmt.Errorf("创建 chromedp 临时目录失败: %w", err)
 	}
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -42,11 +55,49 @@ func newScreenshotAllocator(parent context.Context) (context.Context, context.Ca
 	)
 
 	allocCtx, cancelAllocator := chromedp.NewExecAllocator(parent, opts...)
-	return allocCtx, cancelAllocator, tempDir, nil
+	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
+
+	if err := chromedp.Run(browserCtx); err != nil {
+		cancelBrowser()
+		cancelAllocator()
+		_ = os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("启动 chromedp 失败: %w", err)
+	}
+
+	return &screenshotBrowser{
+		allocCancel:   cancelAllocator,
+		browserCancel: cancelBrowser,
+		browserCtx:    browserCtx,
+		tempDir:       tempDir,
+		tabSlots:      make(chan struct{}, maxTabs),
+	}, nil
+}
+
+func (b *screenshotBrowser) Close() error {
+	if b == nil {
+		return nil
+	}
+	if b.browserCancel != nil {
+		b.browserCancel()
+	}
+	if b.allocCancel != nil {
+		b.allocCancel()
+	}
+	if b.tempDir == "" {
+		return nil
+	}
+	return os.RemoveAll(b.tempDir)
 }
 
 // GetScreenshot 对指定 URL 截图并保存
-func captureScreenshot(ctx context.Context, targetURL string, store assetStore, enableLog bool) (string, error) {
+func (s *FingerScanner) captureScreenshot(ctx context.Context, targetURL string) (string, error) {
+	if s.screenshotBrowser == nil {
+		return "", fmt.Errorf("screenshot browser is not initialized")
+	}
+	return s.screenshotBrowser.Capture(ctx, targetURL, s.screenshotStore, s.shouldPrintDefaultOutput())
+}
+
+func (b *screenshotBrowser) Capture(ctx context.Context, targetURL string, store assetStore, enableLog bool) (string, error) {
 	baseName := renameOutput(targetURL)
 	objectName := baseName + ".webp"
 
@@ -54,15 +105,16 @@ func captureScreenshot(ctx context.Context, targetURL string, store assetStore, 
 	var lastErr error
 
 	for attempt := 1; attempt <= screenshotRetryTime; attempt++ {
-		allocCtx, cancelAllocator, tempDir, err := newScreenshotAllocator(context.Background())
-		if err != nil {
-			return "", err
+		select {
+		case b.tabSlots <- struct{}{}:
+		case <-ctx.Done():
+			return "", ctx.Err()
 		}
 
-		browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
-		browserCtx, cancelTimeout := context.WithTimeout(browserCtx, screenshotTimeout)
+		tabCtx, cancelTab := chromedp.NewContext(b.browserCtx)
+		tabCtx, cancelTimeout := context.WithTimeout(tabCtx, screenshotTimeout)
 
-		lastErr = chromedp.Run(browserCtx,
+		lastErr = chromedp.Run(tabCtx,
 			chromedp.EmulateViewport(1366, 768),
 			chromedp.Navigate(targetURL),
 			chromedp.WaitReady("body", chromedp.ByQuery),
@@ -77,11 +129,8 @@ func captureScreenshot(ctx context.Context, targetURL string, store assetStore, 
 		)
 
 		cancelTimeout()
-		cancelBrowser()
-		cancelAllocator()
-		if err := os.RemoveAll(tempDir); err != nil && enableLog {
-			logger.Default.Warning("[screenshot] cleanup temp dir failed %s: %v", tempDir, err)
-		}
+		cancelTab()
+		<-b.tabSlots
 
 		if lastErr == nil {
 			location, err := store.Save(ctx, objectName, buf)

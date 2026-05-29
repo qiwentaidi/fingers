@@ -58,6 +58,7 @@ type FingerScanner struct {
 	notFollowClient     *resty.Client
 	faviconStore        assetStore
 	screenshotStore     assetStore
+	screenshotBrowser   *screenshotBrowser
 	// dnsxClient              *dnsx.DNSX
 	basicURLWithFingerprint map[string][]string // 后续nuclei需要扫描的目标列表
 	mutex                   sync.RWMutex
@@ -316,7 +317,7 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 		// 截屏
 		var screenshotPath string
 		if s.screenshot && (finalURL.Scheme == "https" || finalURL.Scheme == "http") {
-			if screenshotPath, err = captureScreenshot(ctrlCtx, finalURL.String(), s.screenshotStore, s.shouldPrintDefaultOutput()); err != nil {
+			if screenshotPath, err = s.captureScreenshot(ctrlCtx, finalURL.String()); err != nil {
 				if s.shouldPrintDefaultOutput() {
 					logger.Default.Warning("%s 截屏失败: %v", finalURL.String(), err)
 				}
@@ -497,7 +498,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			// 截屏
 			var screenshotPath string
 			if s.screenshot && (fp.URL.Scheme == "https" || fp.URL.Scheme == "http") {
-				if screenshotPath, err = captureScreenshot(ctx, fullURL, s.screenshotStore, s.shouldPrintDefaultOutput()); err != nil {
+				if screenshotPath, err = s.captureScreenshot(ctx, fullURL); err != nil {
 					if s.shouldPrintDefaultOutput() {
 						logger.Default.Warning("%s 截屏失败: %v", fp.URL.String(), err)
 					}
