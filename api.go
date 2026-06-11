@@ -68,15 +68,19 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	if s.screenshot {
 		browser, err := newScreenshotBrowser(ctx, defaultScreenshotMaxTabs)
 		if err != nil {
-			return fmt.Errorf("init screenshot browser: %w", err)
-		}
-		s.screenshotBrowser = browser
-		defer func() {
-			s.screenshotBrowser = nil
-			if err := browser.Close(); err != nil && s.shouldPrintDefaultOutput() {
-				logger.Default.Warning("[screenshot] close browser failed: %v", err)
+			s.screenshot = false
+			if s.shouldPrintDefaultOutput() {
+				logger.Default.Warning("[screenshot] init browser failed, continue without screenshots: %v", err)
 			}
-		}()
+		} else {
+			s.screenshotBrowser = browser
+			defer func() {
+				s.screenshotBrowser = nil
+				if err := browser.Close(); err != nil && s.shouldPrintDefaultOutput() {
+					logger.Default.Warning("[screenshot] close browser failed: %v", err)
+				}
+			}()
+		}
 	}
 
 	s.FingerScan(ctx, callback)

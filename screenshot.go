@@ -15,8 +15,9 @@ import (
 
 const (
 	screenshotTimeout        = 30 * time.Second
-	screenshotRetryTime      = 2
-	defaultScreenshotMaxTabs = 5
+	screenshotRetryTime      = 1
+	defaultScreenshotMaxTabs = 10
+	screenshotInitTimeout    = 60 * time.Second
 )
 
 type screenshotBrowser struct {
@@ -39,6 +40,7 @@ func newScreenshotBrowser(parent context.Context, maxTabs int) (*screenshotBrows
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.UserDataDir(tempDir),
+		chromedp.WSURLReadTimeout(screenshotInitTimeout),
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 
