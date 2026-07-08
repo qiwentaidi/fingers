@@ -120,7 +120,7 @@ Server: nginx
 - `FINGERPRINT FIELDS` 是程序当前支持识别和调试的字段摘要。
 - `RAW RESPONSE` 是本次请求捕获到的完整响应头和响应体。
 - CLI 不输出本地 `favicon_path`，只输出 `favicon_url` 和 hash 字段。
-- favicon 和截图仍会按 `--storage-dir` 保存到本地，默认目录是 `data`。
+- favicon 和截图仍会按 `--storage-dir` 保存到本地，默认目录是 `data`；未开启 `--screenshot` 时只会跳过截图保存，favicon 仍会独立保存。
 
 ### 常用参数
 
@@ -248,6 +248,8 @@ SDK 会自动派生出：
 
 - `.../favicon`
 - `.../screenshot`
+
+截图开关只控制 screenshot 采集与保存，不影响 favicon。即使 SDK 中通过 `fingers.WithScreenshot(false)` 关闭截图，只要目标站点 favicon 请求成功，图标文件仍会按 favicon 存储配置落地，例如本地模式下保存到 `.../favicon`。
 
 本地存储示例：
 
