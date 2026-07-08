@@ -3,6 +3,7 @@ package fingers
 import (
 	"context"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 const (
 	hostTokenPathProbeTimeout = 5
 	hostTokenPathDetectName   = "HostTokenPath"
+	hostTokenActivePathName   = "HostTokenActivePath"
 )
 
 var ignoredHostTokenPathTokens = map[string]struct{}{
@@ -58,9 +60,20 @@ var publicSuffixHostTokens = map[string]struct{}{
 	"xyz":       {},
 }
 
+var hostTokenPathAliases = map[string][]string{
+	"scjg":  []string{"szjg"},
+	"scjgj": []string{"szjg"},
+}
+
 type hostTokenPathProbeTask struct {
 	base *url.URL
 	path string
+}
+
+type hostTokenActivePathProbeTask struct {
+	base    *url.URL
+	path    string
+	fingers []FingerEntity
 }
 
 func deriveHostTokenPaths(u *url.URL) []string {
@@ -106,6 +119,9 @@ func deriveHostTokens(hostname string) []string {
 			return !isHostTokenAlphaNumeric(r)
 		}) {
 			appendHostToken(&tokens, seen, part)
+		}
+		for _, alias := range hostTokenPathAliases[label] {
+			appendHostToken(&tokens, seen, alias)
 		}
 	}
 	return tokens
@@ -153,13 +169,14 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 		return
 	}
 
-	tasks := s.hostTokenPathProbeTasks()
-	if len(tasks) == 0 {
+	pathTasks := s.hostTokenPathProbeTasks()
+	if len(pathTasks) == 0 {
 		return
 	}
+	activeTasks := s.hostTokenActivePathProbeTasks(pathTasks)
 
 	var wg sync.WaitGroup
-	retChan := make(chan Result, len(tasks))
+	retChan := make(chan Result, len(pathTasks)+len(activeTasks))
 	done := make(chan struct{})
 	discovered := make([]*url.URL, 0)
 
@@ -176,11 +193,17 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 			s.basicURLWithFingerprint[result.URL] = append(s.basicURLWithFingerprint[result.URL], matchedFingerprintNames(result.Fingerprints)...)
 			s.mutex.Unlock()
 
-			if parsed, err := url.Parse(result.URL); err == nil {
-				discovered = append(discovered, parsed)
+			if result.Detect == hostTokenPathDetectName {
+				if parsed, err := url.Parse(result.URL); err == nil {
+					discovered = append(discovered, parsed)
+				}
 			}
 
-			s.logScanResult(hostTokenPathDetectName, result)
+			detect := result.Detect
+			if detect == "" {
+				detect = hostTokenPathDetectName
+			}
+			s.logScanResult(detect, result)
 			if callback != nil && ctx.Err() == nil {
 				callback(result)
 			}
@@ -198,9 +221,15 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 			return
 		}
 
-		task := raw.(hostTokenPathProbeTask)
-		if result, ok := s.probeHostTokenPath(ctx, task.base, task.path); ok {
-			retChan <- result
+		switch task := raw.(type) {
+		case hostTokenPathProbeTask:
+			if result, ok := s.probeHostTokenPath(ctx, task.base, task.path); ok {
+				retChan <- result
+			}
+		case hostTokenActivePathProbeTask:
+			if result, ok := s.probeHostTokenActivePath(ctx, task); ok {
+				retChan <- result
+			}
 		}
 	})
 	if err != nil {
@@ -210,7 +239,16 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 	}
 	defer threadPool.Release()
 
-	for _, task := range tasks {
+	for _, task := range pathTasks {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		if err := threadPool.Invoke(task); err != nil {
+			wg.Done()
+		}
+	}
+	for _, task := range activeTasks {
 		if ctx.Err() != nil {
 			break
 		}
@@ -262,6 +300,36 @@ func (s *FingerScanner) hostTokenPathProbeTasks() []hostTokenPathProbeTask {
 	return tasks
 }
 
+func (s *FingerScanner) hostTokenActivePathProbeTasks(prefixTasks []hostTokenPathProbeTask) []hostTokenActivePathProbeTask {
+	activePathMap := groupActiveFingerprintsByPath(s.getActiveFingerprintDB())
+	if len(prefixTasks) == 0 || len(activePathMap) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	tasks := make([]hostTokenActivePathProbeTask, 0)
+	for _, prefixTask := range prefixTasks {
+		base := buildHostTokenPathURL(prefixTask.base, prefixTask.path)
+		for path, fingers := range activePathMap {
+			if len(fingers) == 0 {
+				continue
+			}
+			fullURL := buildActiveProbeURL(base, path)
+			if _, ok := seen[fullURL]; ok {
+				continue
+			}
+			seen[fullURL] = struct{}{}
+			tasks = append(tasks, hostTokenActivePathProbeTask{
+				base:    base,
+				path:    path,
+				fingers: fingers,
+			})
+		}
+	}
+
+	return tasks
+}
+
 func sameURLPath(left string, right string) bool {
 	return strings.Trim(strings.TrimSpace(left), "/") == strings.Trim(strings.TrimSpace(right), "/")
 }
@@ -273,6 +341,82 @@ func buildHostTokenPathURL(base *url.URL, path string) *url.URL {
 	next.RawQuery = ""
 	next.Fragment = ""
 	return &next
+}
+
+func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostTokenActivePathProbeTask) (Result, bool) {
+	if task.base == nil || ctx.Err() != nil {
+		return Result{}, false
+	}
+
+	fullURL := buildActiveProbeURL(task.base, task.path)
+	resp, err := clients.DoRequest("GET", fullURL, s.headers, nil, hostTokenPathProbeTimeout, s.client)
+	if err != nil || resp == nil || resp.StatusCode() == http.StatusNotFound {
+		return Result{}, false
+	}
+
+	rawResponse := ""
+	if s.enableRawResponse {
+		rawResponse = dumpRawResponsePacket(resp)
+	}
+	if ctx.Err() != nil {
+		return Result{}, false
+	}
+
+	body := httputil.LimitResponseBytes(resp.Body(), maxInfoReponseSize)
+	title := clients.GetTitle(body)
+	if exclude, _ := excludeInterference(resp.StatusCode(), title); exclude {
+		return Result{}, false
+	}
+
+	server := resp.Header().Get("Server")
+	contentType := resp.Header().Get("Content-Type")
+	headers, _, _ := httputil.DumpResponseHeadersAndRaw(resp.RawResponse)
+	web := &WebInfo{
+		HeadeString:   strings.ToLower(string(headers)),
+		ContentType:   strings.ToLower(contentType),
+		BodyString:    strings.ToLower(string(body)),
+		Path:          strings.ToLower(task.path),
+		Title:         strings.ToLower(title),
+		Server:        strings.ToLower(server),
+		ContentLength: len(resp.Body()),
+		Port:          httputil.GetPort(task.base),
+		StatusCode:    resp.StatusCode(),
+	}
+
+	fingerprints := Scan(web, task.fingers)
+	if len(fingerprints) == 0 {
+		return Result{}, false
+	}
+
+	var screenshotPath string
+	if s.screenshot && (task.base.Scheme == "https" || task.base.Scheme == "http") {
+		if screenshotPath, err = s.captureScreenshot(ctx, fullURL); err != nil {
+			if s.shouldPrintDefaultOutput() {
+				logger.Default.Warning("%s 截屏失败: %v", fullURL, err)
+			}
+		}
+	}
+
+	resultPath := task.path
+	if parsed, parseErr := url.Parse(fullURL); parseErr == nil {
+		resultPath = parsed.Path
+	}
+	return Result{
+		URL:          fullURL,
+		Scheme:       task.base.Scheme,
+		Host:         task.base.Host,
+		Port:         web.Port,
+		StatusCode:   web.StatusCode,
+		Length:       web.ContentLength,
+		Title:        title,
+		Server:       server,
+		ContentType:  contentType,
+		Path:         resultPath,
+		Fingerprints: fingerprints,
+		Detect:       hostTokenActivePathName,
+		Screenshot:   screenshotPath,
+		RawResponse:  rawResponse,
+	}, true
 }
 
 func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, candidatePath string) (Result, bool) {

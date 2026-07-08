@@ -141,7 +141,7 @@ Server: nginx
 | `--storage-dir` | favicon 和 screenshot 的本地保存目录，默认 `data` |
 | `-v, --verbose` | 输出识别字段和完整 HTTP 响应包 |
 
-主机名 token 派生路径探测是默认基础能力，例如会从 `https://szzs.invest.beijing.gov.cn/` 自动探测 `/szzs/`。
+主机名 token 派生路径探测是默认基础能力，例如会从 `https://szzs.invest.beijing.gov.cn/` 自动探测 `/szzs/`。派生前缀本身即使未命中，也会继续组合主动指纹路径探测，例如 `/szjg/` + `/webroot/decision/login`。
 
 ## 加载规则
 
