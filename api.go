@@ -84,6 +84,7 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	}
 
 	s.FingerScan(ctx, callback)
+	s.HostTokenPathProbe(ctx, callback)
 	if s.deepScan {
 		s.ActiveFingerScan(ctx, callback)
 	}
