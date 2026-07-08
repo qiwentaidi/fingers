@@ -6,6 +6,7 @@
 
 - 被动指纹识别
 - 主动路径指纹识别
+- 主机名 token 派生路径探测
 - favicon 哈希计算与存储
 - screenshot 截图与存储
 - TLS 证书特征识别
@@ -19,11 +20,128 @@
 go get github.com/qiwentaidi/fingers
 ```
 
+如果启用了 `screenshot` 截图能力，运行环境还需要安装 Chrome/Chromium，并确保浏览器可执行文件在 `PATH` 中。SDK 会尝试查找：
+
+- `google-chrome`
+- `google-chrome-stable`
+- `chromium`
+- `chromium-browser`
+- `chrome`
+
+Linux 常见安装方式示例：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y chromium
+
+# CentOS / RHEL / Fedora
+sudo dnf install -y chromium
+
+# Alpine
+sudo apk add chromium
+```
+
 业务项目推荐通过正常的 Go module 方式引用：
 
 ```go
 import fingers "github.com/qiwentaidi/fingers/lib"
 ```
+
+## 命令行使用
+
+仓库内置了 `cmd/fingerprint` 命令行程序，默认使用编译进二进制的 `cmd/fingerprint/static/finger.yaml` 指纹库。
+
+直接运行：
+
+```bash
+go run ./cmd/fingerprint -u http://example.com
+```
+
+构建后运行：
+
+```bash
+go build -o fingerprint ./cmd/fingerprint
+./fingerprint -u http://example.com
+```
+
+批量扫描目标文件：
+
+```bash
+go run ./cmd/fingerprint -l targets.txt
+```
+
+`targets.txt` 每行一个目标，空行和 `#` 开头的注释行会被忽略。
+
+使用自定义指纹库：
+
+```bash
+go run ./cmd/fingerprint -u http://example.com -f /path/to/finger.yaml
+```
+
+### Verbose 响应包输出
+
+加 `-v` 或 `--verbose` 后，命令会额外打印可用于指纹识别的字段，以及捕获到的完整 HTTP 响应包：
+
+```bash
+go run ./cmd/fingerprint -u 'https://example.com' -v
+```
+
+输出示例：
+
+```text
+[Default] https://example.com [200] [1256] [Example Domain] [Nginx]
+===== FINGERPRINT FIELDS https://example.com =====
+  status: 200
+  server: nginx
+  title: Example Domain
+  content_type: text/html
+  protocol: https
+  host: example.com
+  port: 443
+  path: /
+  length: 1256
+  icon_hash: 0
+  icon_mdhash:
+  favicon_url: https://example.com/favicon.ico
+===== END FINGERPRINT FIELDS https://example.com =====
+===== RAW RESPONSE https://example.com =====
+HTTP/1.1 200 OK
+Content-Length: 1256
+Content-Type: text/html
+Server: nginx
+
+<!DOCTYPE html>
+...
+===== END RAW RESPONSE https://example.com =====
+```
+
+说明：
+
+- `FINGERPRINT FIELDS` 是程序当前支持识别和调试的字段摘要。
+- `RAW RESPONSE` 是本次请求捕获到的完整响应头和响应体。
+- CLI 不输出本地 `favicon_path`，只输出 `favicon_url` 和 hash 字段。
+- favicon 和截图仍会按 `--storage-dir` 保存到本地，默认目录是 `data`。
+
+### 常用参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `-u, --url` | 目标 URL 或 host，可重复，也可用英文逗号分隔 |
+| `-l, --list` | 目标文件路径，每行一个目标 |
+| `-f, --fingerprint` | 自定义指纹 YAML 文件路径 |
+| `-t, --thread` | 扫描并发数，默认 `50` |
+| `-H, --header` | 自定义请求头，格式为 `Key: Value`，可重复 |
+| `--headers` | 多行自定义请求头 |
+| `--proxy` | HTTP/SOCKS 代理地址 |
+| `--deep` | 开启主动路径指纹扫描 |
+| `--root-path` | 主动路径扫描时从站点根路径发起 |
+| `--screenshot` | 开启截图 |
+| `--asset-tag` | 开启 CDN/资产标签探测，默认开启 |
+| `--active-timeout` | 主动扫描中单目标最大失败次数，默认 `10` |
+| `--storage-dir` | favicon 和 screenshot 的本地保存目录，默认 `data` |
+| `-v, --verbose` | 输出识别字段和完整 HTTP 响应包 |
+
+主机名 token 派生路径探测是默认基础能力，例如会从 `https://szzs.invest.beijing.gov.cn/` 自动探测 `/szzs/`。
 
 ## 加载规则
 
