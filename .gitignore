@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Editors and local tooling
+.cursor/
+.codegraph/
+.idea/
+.vscode/
+
+# Go build and test outputs
+bin/
+dist/
+*.test
+*.out
+coverage.out
+*_test.go
+
+# Logs and local environment
+*.log
+.env
+.env.*
+
+data
+
+# Local static configuration
+/cmd/fingerprint/static/finger.yaml
