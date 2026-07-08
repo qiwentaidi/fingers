@@ -31,6 +31,7 @@ type FaviconResult struct {
 	Mmh3Hash string // mmh3 hash值
 	Md5Hash  string // md5 hash值
 	FilePath string // 本地存储路径
+	URL      string // favicon完整URL
 }
 
 // 获取favicon Mmh3Hash32 和 MD5值
@@ -56,6 +57,7 @@ func getFaviconWithStorage(u *url.URL, headers map[string]string, client *resty.
 	if err != nil {
 		return result
 	}
+	result.URL = finalLink
 	resp, err = clients.DoRequest("GET", finalLink, headers, nil, 10, client)
 	if err == nil && resp.StatusCode() == 200 {
 		body := resp.Body()

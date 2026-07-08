@@ -129,6 +129,13 @@ func WithAssetTagProbe(enabled bool) FingersSDKOptions {
 	}
 }
 
+func WithRawResponse(enabled bool) FingersSDKOptions {
+	return func(opts *root.Options) error {
+		opts.EnableRawResponse = enabled
+		return nil
+	}
+}
+
 func WithDefaultOutput(enabled bool) FingersSDKOptions {
 	return func(opts *root.Options) error {
 		opts.DisableDefaultOutput = !enabled

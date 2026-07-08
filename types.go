@@ -38,6 +38,9 @@ type Result struct {
 	StatusCode   int
 	Length       int
 	Title        string
+	Server       string
+	ContentType  string
+	Path         string
 	Fingerprints []FingerprintMatch
 	AssetTags    Tag
 	IsWAF        bool
@@ -45,6 +48,10 @@ type Result struct {
 	Detect       string
 	Screenshot   string
 	Favicon      string
+	FaviconURL   string
+	IconHash     string
+	IconMd5      string
+	RawResponse  string
 }
 
 type ResultCallback func(Result)
@@ -88,6 +95,7 @@ type Options struct {
 	ActiveTimeoutLimit   int
 	EnableScreenshot     bool
 	EnableAssetTagProbe  bool
+	EnableRawResponse    bool
 	DisableDefaultOutput bool
 	FingerprintData      []byte
 	FingerprintPath      string

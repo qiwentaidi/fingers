@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	stdhttputil "net/http/httputil"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -52,6 +53,7 @@ type FingerScanner struct {
 	rootPath            bool       // 主动指纹是否采取根路径扫描
 	screenshot          bool       // 是否截屏
 	enableAssetTagProbe bool
+	enableRawResponse   bool
 	enableDefaultOutput bool
 	headers             map[string]string // 请求头
 	client              *resty.Client
@@ -102,6 +104,7 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		activeTimeoutLimit:      options.ActiveTimeoutLimit,
 		screenshot:              options.EnableScreenshot,
 		enableAssetTagProbe:     options.EnableAssetTagProbe,
+		enableRawResponse:       options.EnableRawResponse,
 		enableDefaultOutput:     !options.DisableDefaultOutput,
 		faviconStore:            faviconStore,
 		screenshotStore:         screenshotStore,
@@ -157,6 +160,17 @@ func (s *FingerScanner) logScanResult(scanType string, pr Result) {
 	)
 }
 
+func dumpRawResponsePacket(resp *resty.Response) string {
+	if resp == nil || resp.RawResponse == nil {
+		return ""
+	}
+	headers, err := stdhttputil.DumpResponse(resp.RawResponse, false)
+	if err != nil {
+		return ""
+	}
+	return string(append(headers, resp.Body()...))
+}
+
 // FingerScan 执行指纹扫描
 func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallback) {
 	var wg sync.WaitGroup
@@ -203,12 +217,16 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			server      string
 			contentType string
 			statusCode  int
+			rawResponse string
 		)
 
 		// 先进行一次不会重定向的扫描，可以获得重定向前页面的响应头中获取指纹
 		resp, err := clients.DoRequest("GET", u.String(), s.headers, nil, 10, s.notFollowClient)
 		if err == nil && resp.StatusCode() >= 300 && resp.StatusCode() < 400 {
 			rawHeaders = httputil.DumpResponseHeadersOnly(resp.RawResponse)
+			if s.enableRawResponse {
+				rawResponse = dumpRawResponsePacket(resp)
+			}
 		}
 
 		// 在网络请求后检查 context
@@ -227,6 +245,15 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 					logger.Default.Debug("request %s error: %v", u.String(), err)
 				}
 				return
+			}
+		}
+		if s.enableRawResponse {
+			finalRawResponse := dumpRawResponsePacket(resp)
+			switch {
+			case rawResponse != "" && finalRawResponse != "":
+				rawResponse += "\n\n--- final response ---\n\n" + finalRawResponse
+			case finalRawResponse != "":
+				rawResponse = finalRawResponse
 			}
 		}
 
@@ -338,10 +365,17 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			StatusCode:   web.StatusCode,
 			Length:       web.ContentLength,
 			Title:        title,
+			Server:       server,
+			ContentType:  contentType,
+			Path:         finalURL.Path,
 			Fingerprints: fingerprints,
 			Detect:       "Default",
 			Screenshot:   screenshotPath,
 			Favicon:      faviconResult.FilePath, // favicon图片路径
+			FaviconURL:   faviconResult.URL,
+			IconHash:     faviconResult.Mmh3Hash,
+			IconMd5:      faviconResult.Md5Hash,
+			RawResponse:  rawResponse,
 		}
 
 		if assets != nil {
@@ -469,6 +503,10 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			timeoutCounter.Store(baseURL, v.(int)+1)
 			return
 		}
+		rawResponse := ""
+		if s.enableRawResponse {
+			rawResponse = dumpRawResponsePacket(resp)
+		}
 
 		// 在处理响应前检查 context
 		if ctx.Err() != nil {
@@ -519,12 +557,16 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 				StatusCode:   ti.StatusCode,
 				Length:       ti.ContentLength,
 				Title:        title,
+				Server:       server,
+				ContentType:  contentType,
+				Path:         fp.Path,
 				Fingerprints: result,
 				Detect:       "Active",
 				Port:         ti.Port,
 				Scheme:       fp.URL.Scheme,
 				Host:         fp.URL.Host,
 				Screenshot:   screenshotPath,
+				RawResponse:  rawResponse,
 			}
 		}
 	})
