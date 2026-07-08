@@ -2,9 +2,12 @@ package fingers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -63,7 +66,7 @@ func newScreenshotBrowser(parent context.Context, maxTabs int) (*screenshotBrows
 		cancelBrowser()
 		cancelAllocator()
 		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("启动 chromedp 失败: %w", err)
+		return nil, enrichChromedpStartError(err)
 	}
 
 	return &screenshotBrowser{
@@ -89,6 +92,31 @@ func (b *screenshotBrowser) Close() error {
 		return nil
 	}
 	return os.RemoveAll(b.tempDir)
+}
+
+func enrichChromedpStartError(err error) error {
+	base := fmt.Errorf("启动 chromedp 失败: %w", err)
+	if !isChromeExecutableMissing(err) {
+		return base
+	}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("%w；未找到 Chrome/Chromium 浏览器，请安装后重试", base)
+	}
+	return fmt.Errorf(
+		"%w；Linux 环境未找到 Chrome/Chromium 浏览器，请先安装后重试，例如 Debian/Ubuntu: `sudo apt-get install -y chromium`，CentOS/RHEL/Fedora: `sudo yum install -y chromium`，Alpine: `sudo apk add chromium`；如果已安装到自定义位置，请将其加入 PATH 或创建软链接",
+		base,
+	)
+}
+
+func isChromeExecutableMissing(err error) bool {
+	if errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
+		return true
+	}
+	return strings.Contains(err.Error(), "executable file not found")
 }
 
 // GetScreenshot 对指定 URL 截图并保存
