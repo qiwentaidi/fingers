@@ -13,6 +13,7 @@ require (
 	github.com/qiwentaidi/clients v0.0.5
 	github.com/qiwentaidi/utils v0.0.5
 	github.com/twmb/murmur3 v1.1.8
+	github.com/urfave/cli/v3 v3.10.1
 	github.com/zmap/zcrypto v0.0.0-20240803002437-3a861682ac77
 	gopkg.in/yaml.v2 v2.4.0
 )
