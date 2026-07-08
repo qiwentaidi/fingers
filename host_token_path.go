@@ -312,6 +312,12 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 		return Result{}, false
 	}
 
+	finalURL := candidateURL
+	if finalResp.RawResponse != nil && finalResp.RawResponse.Request != nil && finalResp.RawResponse.Request.URL != nil {
+		finalURL = finalResp.RawResponse.Request.URL
+	}
+	faviconResult := getFaviconWithStorage(finalURL, s.headers, s.client, s.faviconStore)
+
 	body := httputil.LimitResponseBytes(finalResp.Body(), maxInfoReponseSize)
 	title := clients.GetTitle(body)
 	if exclude, _ := excludeInterference(finalResp.StatusCode(), title); exclude {
@@ -331,6 +337,8 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 		ContentLength: len(finalResp.Body()),
 		Port:          httputil.GetPort(candidateURL),
 		StatusCode:    entryResp.StatusCode(),
+		IconHash:      faviconResult.Mmh3Hash,
+		IconMd5:       faviconResult.Md5Hash,
 	}
 
 	var fingerprintDB []FingerEntity
@@ -367,6 +375,10 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 		Fingerprints: fingerprints,
 		Detect:       hostTokenPathDetectName,
 		Screenshot:   screenshotPath,
+		Favicon:      faviconResult.FilePath,
+		FaviconURL:   faviconResult.URL,
+		IconHash:     faviconResult.Mmh3Hash,
+		IconMd5:      faviconResult.Md5Hash,
 		RawResponse:  rawResponse,
 	}, true
 }

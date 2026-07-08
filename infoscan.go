@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	stdhttputil "net/http/httputil"
 	"net/url"
 	"regexp"
@@ -405,9 +406,11 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 }
 
 type ActiveFingerDetect struct {
-	URL  *url.URL
-	Fpe  []FingerEntity
-	Path string
+	URL               *url.URL
+	Fpe               []FingerEntity
+	Path              string
+	Detect            string
+	KnownFingerprints []string
 }
 
 // 让每一个路径都只绑定一个实体
@@ -451,6 +454,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	var wg sync.WaitGroup
 	visited := sync.Map{}        // 记录已访问路径
 	timeoutCounter := sync.Map{} // 记录每个目标的超时次数
+	seenAdminPathFingerprints := make(map[string]struct{})
 	single := make(chan struct{})
 	retChan := make(chan Result, len(s.urls))
 
@@ -463,7 +467,25 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 				}
 				break
 			}
-			s.logScanResult("Active", pr)
+			detect := pr.Detect
+			if detect == "" {
+				detect = "Active"
+			}
+			if detect == adminPathDetectName {
+				var ok bool
+				pr, ok = deduplicateAdminPathResult(pr, seenAdminPathFingerprints)
+				if !ok {
+					continue
+				}
+				s.mutex.Lock()
+				if s.basicURLWithFingerprint == nil {
+					s.basicURLWithFingerprint = make(map[string][]string)
+				}
+				mapKey := adminPathDedupeTarget(pr)
+				s.basicURLWithFingerprint[mapKey] = append(s.basicURLWithFingerprint[mapKey], matchedFingerprintNames(pr.Fingerprints)...)
+				s.mutex.Unlock()
+			}
+			s.logScanResult(detect, pr)
 			// 调用回调函数前检查 context
 			if callback != nil && ctx.Err() == nil {
 				callback(pr)
@@ -482,7 +504,14 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		}
 
 		fp := tfp.(ActiveFingerDetect)
-		fullURL := fp.URL.String() + fp.Path
+		if fp.URL == nil {
+			return
+		}
+		detect := fp.Detect
+		if detect == "" {
+			detect = "Active"
+		}
+		fullURL := buildActiveProbeURL(fp.URL, fp.Path)
 		baseURL := fp.URL.String()
 
 		if val, ok := timeoutCounter.Load(baseURL); ok && val.(int) >= s.activeTimeoutLimit {
@@ -492,15 +521,19 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			return
 		}
 
-		if _, ok := visited.Load(fullURL); ok {
+		visitKey := detect + "\x00" + fullURL
+		if _, ok := visited.Load(visitKey); ok {
 			return
 		}
-		visited.Store(fullURL, true)
+		visited.Store(visitKey, true)
 
 		resp, err := clients.DoRequest("GET", fullURL, s.headers, nil, 5, s.client)
 		if err != nil {
 			v, _ := timeoutCounter.LoadOrStore(baseURL, 1)
 			timeoutCounter.Store(baseURL, v.(int)+1)
+			return
+		}
+		if detect == adminPathDetectName && resp.StatusCode() == http.StatusNotFound {
 			return
 		}
 		rawResponse := ""
@@ -519,6 +552,12 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		title := clients.GetTitle(body)
 
 		headers, _, _ := httputil.DumpResponseHeadersAndRaw(resp.RawResponse)
+		faviconResult := FaviconResult{}
+		if detect == adminPathDetectName {
+			if probeURL, parseErr := url.Parse(fullURL); parseErr == nil {
+				faviconResult = getFaviconWithStorage(probeURL, s.headers, s.client, s.faviconStore)
+			}
+		}
 		ti := &WebInfo{
 			HeadeString:   strings.ToLower(string(headers)),
 			ContentType:   strings.ToLower(contentType),
@@ -529,8 +568,13 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			ContentLength: len(body),
 			Port:          httputil.GetPort(fp.URL),
 			StatusCode:    resp.StatusCode(),
+			IconHash:      faviconResult.Mmh3Hash,
+			IconMd5:       faviconResult.Md5Hash,
 		}
 		result := Scan(ti, fp.Fpe)
+		if detect == adminPathDetectName {
+			result = differentFingerprintMatches(result, fp.KnownFingerprints)
+		}
 
 		if len(result) > 0 {
 			// 截屏
@@ -548,9 +592,14 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 				return
 			}
 
-			s.mutex.Lock()
-			s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], matchedFingerprintNames(result)...)
-			s.mutex.Unlock()
+			if detect != adminPathDetectName {
+				s.mutex.Lock()
+				if s.basicURLWithFingerprint == nil {
+					s.basicURLWithFingerprint = make(map[string][]string)
+				}
+				s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], matchedFingerprintNames(result)...)
+				s.mutex.Unlock()
+			}
 
 			retChan <- Result{
 				URL:          fullURL,
@@ -561,11 +610,15 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 				ContentType:  contentType,
 				Path:         fp.Path,
 				Fingerprints: result,
-				Detect:       "Active",
+				Detect:       detect,
 				Port:         ti.Port,
 				Scheme:       fp.URL.Scheme,
 				Host:         fp.URL.Host,
 				Screenshot:   screenshotPath,
+				Favicon:      faviconResult.FilePath,
+				FaviconURL:   faviconResult.URL,
+				IconHash:     faviconResult.Mmh3Hash,
+				IconMd5:      faviconResult.Md5Hash,
 				RawResponse:  rawResponse,
 			}
 		}
@@ -574,7 +627,8 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 	count := s.ActiveCounts()
 
-	activePathMap := groupActiveFingerprintsByPath(s.fingerprintRepo.GetActiveFingerprintDB())
+	activePathMap := groupActiveFingerprintsByPath(s.getActiveFingerprintDB())
+	fullFingerprintDB := s.getFingerprintDB()
 	for _, target := range s.aliveURLs {
 		// 在外层循环检查 context
 		if ctx.Err() != nil {
@@ -584,13 +638,21 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			break
 		}
 
+		activeTarget := target
+		if s.rootPath {
+			activeTarget, _ = url.Parse(httputil.GetBasicURL(target.String()))
+		}
+		if activeTarget == nil {
+			continue
+		}
+
 		for path, fingers := range activePathMap {
 			// 在内层循环也检查 context
 			if ctx.Err() != nil {
 				break
 			}
 
-			base := target.String()
+			base := activeTarget.String()
 			if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
 				s.IncreaseActiveProgress(&id, count)
 				continue
@@ -598,16 +660,44 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 			wg.Add(1)
 			s.IncreaseActiveProgress(&id, count)
-			activeTarget := target
-			if s.rootPath {
-				activeTarget, _ = url.Parse(httputil.GetBasicURL(target.String()))
+
+			if err := threadPool.Invoke(ActiveFingerDetect{
+				URL:    activeTarget,
+				Fpe:    fingers,
+				Path:   path,
+				Detect: "Active",
+			}); err != nil {
+				wg.Done()
+			}
+		}
+
+		if len(fullFingerprintDB) == 0 {
+			continue
+		}
+		knownFingerprints := s.knownFingerprintsForActiveTarget(target, activeTarget)
+		for _, path := range basicAdminBackendPaths {
+			// 在内层循环也检查 context
+			if ctx.Err() != nil {
+				break
 			}
 
-			threadPool.Invoke(ActiveFingerDetect{
-				URL:  activeTarget,
-				Fpe:  fingers,
-				Path: path,
-			})
+			base := activeTarget.String()
+			if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
+				s.IncreaseActiveProgress(&id, count)
+				continue
+			}
+
+			wg.Add(1)
+			s.IncreaseActiveProgress(&id, count)
+			if err := threadPool.Invoke(ActiveFingerDetect{
+				URL:               activeTarget,
+				Fpe:               fullFingerprintDB,
+				Path:              path,
+				Detect:            adminPathDetectName,
+				KnownFingerprints: knownFingerprints,
+			}); err != nil {
+				wg.Done()
+			}
 		}
 	}
 
@@ -616,11 +706,102 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	<-single
 }
 
+func buildActiveProbeURL(base *url.URL, probePath string) string {
+	if base == nil {
+		return probePath
+	}
+	next := *base
+	next.RawQuery = ""
+	next.Fragment = ""
+	if probePath == "" {
+		return next.String()
+	}
+	if !strings.HasPrefix(probePath, "/") {
+		probePath = "/" + probePath
+	}
+	basePath := strings.TrimRight(next.Path, "/")
+	if basePath == "" {
+		next.Path = probePath
+	} else {
+		next.Path = basePath + probePath
+	}
+	next.RawPath = ""
+	return next.String()
+}
+
+func (s *FingerScanner) getFingerprintDB() []FingerEntity {
+	if s == nil || s.fingerprintRepo == nil {
+		return nil
+	}
+	return s.fingerprintRepo.GetFingerprintDB()
+}
+
+func (s *FingerScanner) getActiveFingerprintDB() []FingerEntity {
+	if s == nil || s.fingerprintRepo == nil {
+		return nil
+	}
+	return s.fingerprintRepo.GetActiveFingerprintDB()
+}
+
+func (s *FingerScanner) knownFingerprintsForActiveTarget(target *url.URL, activeTarget *url.URL) []string {
+	if s == nil || s.basicURLWithFingerprint == nil {
+		return nil
+	}
+
+	seenKeys := make(map[string]struct{})
+	keys := make([]string, 0, 4)
+	appendKnownFingerprintKey := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		if _, ok := seenKeys[raw]; ok {
+			return
+		}
+		seenKeys[raw] = struct{}{}
+		keys = append(keys, raw)
+	}
+
+	if target != nil {
+		appendKnownFingerprintKey(target.String())
+		appendKnownFingerprintKey(httputil.GetBasicURL(target.String()))
+	}
+	if activeTarget != nil {
+		appendKnownFingerprintKey(activeTarget.String())
+		appendKnownFingerprintKey(httputil.GetBasicURL(activeTarget.String()))
+	}
+
+	seenNames := make(map[string]struct{})
+	names := make([]string, 0)
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	for _, key := range keys {
+		for _, name := range s.basicURLWithFingerprint[key] {
+			if name == "" {
+				continue
+			}
+			if _, ok := seenNames[name]; ok {
+				continue
+			}
+			seenNames[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // 统计主动指纹总共要扫描的目标
 func (s *FingerScanner) ActiveCounts() int {
-	activePathMap := groupActiveFingerprintsByPath(s.fingerprintRepo.GetActiveFingerprintDB())
-	count := len(s.aliveURLs) * len(activePathMap)
-	return count
+	if s == nil || len(s.aliveURLs) == 0 {
+		return 0
+	}
+
+	activePathMap := groupActiveFingerprintsByPath(s.getActiveFingerprintDB())
+	pathCount := len(activePathMap)
+	if len(s.getFingerprintDB()) > 0 {
+		pathCount += len(basicAdminBackendPaths)
+	}
+	return len(s.aliveURLs) * pathCount
 }
 
 func (s *FingerScanner) IncreaseActiveProgress(id *int32, total int) {
