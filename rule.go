@@ -13,14 +13,15 @@ import (
 )
 
 type Fingerprint struct {
-	Name        string               `yaml:"name"`
-	HighRisk    bool                 `yaml:"high_risk,omitempty"`
-	Vendor      string               `yaml:"vendor,omitempty"`
-	Description string               `yaml:"description,omitempty"`
-	Path        []string             `yaml:"path,omitempty"`
-	Rule        []string             `yaml:"rule"`
-	Vuln        bool                 `yaml:"vuln,omitempty"`
-	Extract     []FingerprintExtract `yaml:"extract,omitempty"`
+	Name           string               `yaml:"name"`
+	HighRisk       bool                 `yaml:"high_risk,omitempty"`
+	Vendor         string               `yaml:"vendor,omitempty"`
+	Description    string               `yaml:"description,omitempty"`
+	Path           []string             `yaml:"path,omitempty"`
+	ContextEnabled bool                 `yaml:"context_enable,omitempty"`
+	Rule           []string             `yaml:"rule"`
+	Vuln           bool                 `yaml:"vuln,omitempty"`
+	Extract        []FingerprintExtract `yaml:"extract,omitempty"`
 }
 
 type FingerprintExtract struct {
@@ -31,14 +32,15 @@ type FingerprintExtract struct {
 
 // 指纹实体
 type FingerEntity struct {
-	ProductName string
-	HighRisk    bool
-	AllString   string
-	Description string
-	Path        []string
-	Rule        []RuleData
-	Vuln        bool
-	Extract     []FingerprintExtract
+	ProductName    string
+	HighRisk       bool
+	AllString      string
+	Description    string
+	Path           []string
+	ContextEnabled bool
+	Rule           []RuleData
+	Vuln           bool
+	Extract        []FingerprintExtract
 }
 
 type RuleData struct {
@@ -52,8 +54,9 @@ type RuleData struct {
 }
 
 type FingerprintRepository struct {
-	FingerprintDB       []FingerEntity
-	ActiveFingerprintDB []FingerEntity
+	FingerprintDB              []FingerEntity
+	ActiveFingerprintDB        []FingerEntity
+	ContextActiveFingerprintDB []FingerEntity
 }
 
 func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
@@ -70,14 +73,15 @@ func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
 		for _, finger := range fingers {
 			for _, rule := range finger.Rule {
 				entity := FingerEntity{
-					ProductName: finger.Name,
-					Rule:        ParseRule(rule),
-					Description: finger.Description,
-					HighRisk:    finger.HighRisk,
-					AllString:   rule,
-					Path:        finger.Path,
-					Vuln:        finger.Vuln,
-					Extract:     append([]FingerprintExtract(nil), finger.Extract...),
+					ProductName:    finger.Name,
+					Rule:           ParseRule(rule),
+					Description:    finger.Description,
+					HighRisk:       finger.HighRisk,
+					AllString:      rule,
+					Path:           finger.Path,
+					ContextEnabled: finger.ContextEnabled,
+					Vuln:           finger.Vuln,
+					Extract:        append([]FingerprintExtract(nil), finger.Extract...),
 				}
 				result = append(result, entity)
 			}
@@ -108,15 +112,20 @@ func BuildFingerprintRepository(fingers []FingerEntity) *FingerprintRepository {
 	copy(result, fingers)
 
 	var active []FingerEntity
+	var contextActive []FingerEntity
 	for _, entity := range result {
 		if len(entity.Path) > 0 {
 			active = append(active, entity)
+			if entity.ContextEnabled {
+				contextActive = append(contextActive, entity)
+			}
 		}
 	}
 
 	return &FingerprintRepository{
-		FingerprintDB:       result,
-		ActiveFingerprintDB: active,
+		FingerprintDB:              result,
+		ActiveFingerprintDB:        active,
+		ContextActiveFingerprintDB: contextActive,
 	}
 }
 
@@ -129,6 +138,12 @@ func (r *FingerprintRepository) GetFingerprintDB() []FingerEntity {
 func (r *FingerprintRepository) GetActiveFingerprintDB() []FingerEntity {
 	result := make([]FingerEntity, len(r.ActiveFingerprintDB))
 	copy(result, r.ActiveFingerprintDB)
+	return result
+}
+
+func (r *FingerprintRepository) GetContextActiveFingerprintDB() []FingerEntity {
+	result := make([]FingerEntity, len(r.ContextActiveFingerprintDB))
+	copy(result, r.ContextActiveFingerprintDB)
 	return result
 }
 
@@ -172,7 +187,7 @@ func getRuleData(rule string) RuleData {
 		ti = 1
 	}
 	for i := pos - 1 - ti; i >= 0; i-- {
-		if (rule[i] > 122 || rule[i] < 97) && rule[i] != 95 {
+		if !isRuleKeyChar(rule[i]) {
 			start = i + 1
 			break
 		}
@@ -196,6 +211,10 @@ func getRuleData(rule string) RuleData {
 	valueLc := strings.ToLower(value)
 	valueLc = strings.ReplaceAll(valueLc, "\\\"", "\"")
 	return RuleData{Start: start, End: end, Op: int16(op), Key: key, Value: value, ValueLC: valueLc, All: all}
+}
+
+func isRuleKeyChar(char byte) bool {
+	return (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_'
 }
 
 // 将 T/F 替换为 true/false，并转换逻辑运算符符号

@@ -101,7 +101,7 @@ go run ./cmd/fingerprint -u 'https://example.com' -v
   path: /
   length: 1256
   icon_hash: 0
-  icon_mdhash:
+  icon_md5:
   favicon_url: https://example.com/favicon.ico
 ===== END FINGERPRINT FIELDS https://example.com =====
 ===== RAW RESPONSE https://example.com =====

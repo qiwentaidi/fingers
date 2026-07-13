@@ -65,12 +65,15 @@ func loadFingerprintRepository(options Options) (*FingerprintRepository, error) 
 }
 
 func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error {
-	if s.screenshot {
-		browser, err := newScreenshotBrowser(ctx, defaultScreenshotMaxTabs)
+	needDynamicContext := s.deepScan && len(s.getContextActiveFingerprintDB()) > 0
+	if s.screenshot || needDynamicContext {
+		browser, err := newScreenshotBrowser(ctx, defaultScreenshotMaxTabs, s.proxy)
 		if err != nil {
-			s.screenshot = false
+			if s.screenshot {
+				s.screenshot = false
+			}
 			if s.shouldPrintDefaultOutput() {
-				logger.Default.Warning("[screenshot] init browser failed, continue without screenshots: %v", err)
+				logger.Default.Warning("[headless] init browser failed, continue with static JS context fallback: %v", err)
 			}
 		} else {
 			s.screenshotBrowser = browser
@@ -84,6 +87,9 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	}
 
 	s.FingerScan(ctx, callback)
+	if needDynamicContext {
+		s.discoverDynamicContextPaths(ctx)
+	}
 	s.HostTokenPathProbe(ctx, callback)
 	if s.deepScan {
 		s.ActiveFingerScan(ctx, callback)

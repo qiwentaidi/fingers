@@ -14,7 +14,6 @@ dist/
 *.out
 coverage.out
 *_test.go
-!admin_path_test.go
 
 # Logs and local environment
 *.log

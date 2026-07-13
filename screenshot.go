@@ -9,18 +9,22 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/qiwentaidi/fingers/internal/logger"
 )
 
 const (
-	screenshotTimeout        = 30 * time.Second
-	screenshotRetryTime      = 1
-	defaultScreenshotMaxTabs = 10
-	screenshotInitTimeout    = 60 * time.Second
+	screenshotTimeout         = 30 * time.Second
+	screenshotRetryTime       = 1
+	defaultScreenshotMaxTabs  = 10
+	screenshotInitTimeout     = 60 * time.Second
+	dynamicCaptureInitialWait = 4 * time.Second
+	dynamicCaptureTimeout     = 20 * time.Second
 )
 
 type screenshotBrowser struct {
@@ -31,7 +35,7 @@ type screenshotBrowser struct {
 	tabSlots      chan struct{}
 }
 
-func newScreenshotBrowser(parent context.Context, maxTabs int) (*screenshotBrowser, error) {
+func newScreenshotBrowser(parent context.Context, maxTabs int, proxy string) (*screenshotBrowser, error) {
 	if maxTabs <= 0 {
 		maxTabs = 1
 	}
@@ -58,6 +62,9 @@ func newScreenshotBrowser(parent context.Context, maxTabs int) (*screenshotBrows
 		chromedp.Flag("disable-backgrounding-occluded-windows", true),
 		chromedp.Flag("disable-renderer-backgrounding", true),
 	)
+	if strings.TrimSpace(proxy) != "" {
+		opts = append(opts, chromedp.ProxyServer(proxy))
+	}
 
 	allocCtx, cancelAllocator := chromedp.NewExecAllocator(parent, opts...)
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
@@ -76,6 +83,57 @@ func newScreenshotBrowser(parent context.Context, maxTabs int) (*screenshotBrows
 		tempDir:       tempDir,
 		tabSlots:      make(chan struct{}, maxTabs),
 	}, nil
+}
+
+func (b *screenshotBrowser) CaptureNetworkURLs(ctx context.Context, targetURL string) ([]string, error) {
+	if b == nil || b.browserCtx == nil {
+		return nil, fmt.Errorf("headless browser is not initialized")
+	}
+	select {
+	case b.tabSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-b.tabSlots }()
+
+	tabCtx, cancelTab := chromedp.NewContext(b.browserCtx)
+	defer cancelTab()
+	captureCtx, cancelCapture := context.WithTimeout(tabCtx, dynamicCaptureTimeout)
+	defer cancelCapture()
+
+	seen := make(map[string]struct{})
+	urls := make([]string, 0)
+	var mu sync.Mutex
+	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
+		request, ok := ev.(*network.EventRequestWillBeSent)
+		if !ok || request == nil || request.Request == nil || !isHTTPURL(request.Request.URL) {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if _, exists := seen[request.Request.URL]; exists {
+			return
+		}
+		seen[request.Request.URL] = struct{}{}
+		urls = append(urls, request.Request.URL)
+	})
+
+	if err := chromedp.Run(captureCtx,
+		network.Enable(),
+		chromedp.Navigate(targetURL),
+		chromedp.Sleep(dynamicCaptureInitialWait),
+	); err != nil {
+		return urls, err
+	}
+	return urls, nil
+}
+
+func isHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
 }
 
 func (b *screenshotBrowser) Close() error {

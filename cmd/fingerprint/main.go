@@ -307,7 +307,7 @@ func printFingerprintFields(result fingerssdk.Result) {
 	fmt.Printf("  path: %s\n", displayPath(result.Path))
 	fmt.Printf("  length: %d\n", result.Length)
 	fmt.Printf("  icon_hash: %s\n", result.IconHash)
-	fmt.Printf("  icon_mdhash: %s\n", result.IconMd5)
+	fmt.Printf("  icon_md5: %s\n", result.IconMd5)
 	fmt.Printf("  favicon_url: %s\n", result.FaviconURL)
 	fmt.Printf("===== END FINGERPRINT FIELDS %s =====\n", result.URL)
 }
