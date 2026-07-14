@@ -122,6 +122,15 @@ func WithScreenshot(enabled bool) FingersSDKOptions {
 	}
 }
 
+// WithScreenshotDiagnostics enables browser startup and screenshot failure logs
+// without enabling the scanner's normal result output.
+func WithScreenshotDiagnostics(enabled bool) FingersSDKOptions {
+	return func(opts *root.Options) error {
+		opts.ScreenshotDiagnostics = enabled
+		return nil
+	}
+}
+
 func WithAssetTagProbe(enabled bool) FingersSDKOptions {
 	return func(opts *root.Options) error {
 		opts.EnableAssetTagProbe = enabled

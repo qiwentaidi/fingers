@@ -244,6 +244,7 @@ func buildSDKOptions(opts cliOptions, targets []string) []fingerssdk.FingersSDKO
 		fingerssdk.WithDeepScan(opts.deepScan),
 		fingerssdk.WithRootPath(opts.rootPath),
 		fingerssdk.WithScreenshot(opts.screenshot),
+		fingerssdk.WithScreenshotDiagnostics(opts.screenshot),
 		fingerssdk.WithAssetTagProbe(opts.assetTag),
 		fingerssdk.WithRawResponse(opts.rawResponse),
 		fingerssdk.WithActiveTimeoutLimit(opts.activeTimeoutLimit),

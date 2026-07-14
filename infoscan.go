@@ -45,24 +45,25 @@ type WebInfo struct {
 }
 
 type FingerScanner struct {
-	urls                []*url.URL
-	fingerprintRepo     *FingerprintRepository
-	aliveURLs           []*url.URL // 默认指纹扫描结束后，存活的URL，以便后续主动指纹过滤目标
-	activeTimeoutLimit  int        // 主动指纹扫描超时超过该次数就不再扫描该目标
-	thread              int        // 指纹线程
-	deepScan            bool       // 代表主动指纹探测
-	rootPath            bool       // 主动指纹是否采取根路径扫描
-	screenshot          bool       // 是否截屏
-	enableAssetTagProbe bool
-	enableRawResponse   bool
-	enableDefaultOutput bool
-	headers             map[string]string // 请求头
-	client              *resty.Client
-	notFollowClient     *resty.Client
-	proxy               string
-	faviconStore        assetStore
-	screenshotStore     assetStore
-	screenshotBrowser   *screenshotBrowser
+	urls                  []*url.URL
+	fingerprintRepo       *FingerprintRepository
+	aliveURLs             []*url.URL // 默认指纹扫描结束后，存活的URL，以便后续主动指纹过滤目标
+	activeTimeoutLimit    int        // 主动指纹扫描超时超过该次数就不再扫描该目标
+	thread                int        // 指纹线程
+	deepScan              bool       // 代表主动指纹探测
+	rootPath              bool       // 主动指纹是否采取根路径扫描
+	screenshot            bool       // 是否截屏
+	screenshotDiagnostics bool       // 是否输出浏览器/截图诊断日志
+	enableAssetTagProbe   bool
+	enableRawResponse     bool
+	enableDefaultOutput   bool
+	headers               map[string]string // 请求头
+	client                *resty.Client
+	notFollowClient       *resty.Client
+	proxy                 string
+	faviconStore          assetStore
+	screenshotStore       assetStore
+	screenshotBrowser     *screenshotBrowser
 	// dnsxClient              *dnsx.DNSX
 	basicURLWithFingerprint map[string][]string // 后续nuclei需要扫描的目标列表
 	mutex                   sync.RWMutex
@@ -110,6 +111,7 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		rootPath:                options.RootPath,
 		activeTimeoutLimit:      options.ActiveTimeoutLimit,
 		screenshot:              options.EnableScreenshot,
+		screenshotDiagnostics:   options.ScreenshotDiagnostics,
 		enableAssetTagProbe:     options.EnableAssetTagProbe,
 		enableRawResponse:       options.EnableRawResponse,
 		enableDefaultOutput:     !options.DisableDefaultOutput,
@@ -125,6 +127,10 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 
 func (s *FingerScanner) shouldPrintDefaultOutput() bool {
 	return s != nil && s.enableDefaultOutput
+}
+
+func (s *FingerScanner) shouldReportScreenshotDiagnostics() bool {
+	return s != nil && (s.enableDefaultOutput || s.screenshotDiagnostics)
 }
 
 func (s *FingerScanner) formatDefaultFingerprintOutput(pr Result) string {
@@ -356,7 +362,7 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 		var screenshotPath string
 		if s.screenshot && (finalURL.Scheme == "https" || finalURL.Scheme == "http") {
 			if screenshotPath, err = s.captureScreenshot(ctrlCtx, finalURL.String()); err != nil {
-				if s.shouldPrintDefaultOutput() {
+				if s.shouldReportScreenshotDiagnostics() {
 					logger.Default.Warning("%s 截屏失败: %v", finalURL.String(), err)
 				}
 			}
@@ -600,7 +606,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			var screenshotPath string
 			if s.screenshot && (fp.URL.Scheme == "https" || fp.URL.Scheme == "http") {
 				if screenshotPath, err = s.captureScreenshot(ctx, fullURL); err != nil {
-					if s.shouldPrintDefaultOutput() {
+					if s.shouldReportScreenshotDiagnostics() {
 						logger.Default.Warning("%s 截屏失败: %v", fp.URL.String(), err)
 					}
 				}

@@ -62,6 +62,9 @@ func newScreenshotBrowser(parent context.Context, maxTabs int, proxy string) (*s
 		chromedp.Flag("disable-backgrounding-occluded-windows", true),
 		chromedp.Flag("disable-renderer-backgrounding", true),
 	)
+	// Windows requires a process creation attribute to prevent the Chrome
+	// subprocess from briefly showing an empty window during startup.
+	opts = append(opts, screenshotBrowserPlatformOptions()...)
 	if strings.TrimSpace(proxy) != "" {
 		opts = append(opts, chromedp.ProxyServer(proxy))
 	}
@@ -182,7 +185,7 @@ func (s *FingerScanner) captureScreenshot(ctx context.Context, targetURL string)
 	if s.screenshotBrowser == nil {
 		return "", fmt.Errorf("screenshot browser is not initialized")
 	}
-	return s.screenshotBrowser.Capture(ctx, targetURL, s.screenshotStore, s.shouldPrintDefaultOutput())
+	return s.screenshotBrowser.Capture(ctx, targetURL, s.screenshotStore, s.shouldReportScreenshotDiagnostics())
 }
 
 func (b *screenshotBrowser) Capture(ctx context.Context, targetURL string, store assetStore, enableLog bool) (string, error) {

@@ -66,14 +66,21 @@ var hostTokenPathAliases = map[string][]string{
 }
 
 type hostTokenPathProbeTask struct {
-	base *url.URL
-	path string
+	base              *url.URL
+	path              string
+	knownFingerprints []string
 }
 
 type hostTokenActivePathProbeTask struct {
-	base    *url.URL
-	path    string
-	fingers []FingerEntity
+	base              *url.URL
+	path              string
+	fingers           []FingerEntity
+	knownFingerprints []string
+}
+
+type hostTokenPathProbeResult struct {
+	result            Result
+	knownFingerprints []string
 }
 
 func deriveHostTokenPaths(u *url.URL) []string {
@@ -176,14 +183,33 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 	activeTasks := s.hostTokenActivePathProbeTasks(pathTasks)
 
 	var wg sync.WaitGroup
-	retChan := make(chan Result, len(pathTasks)+len(activeTasks))
+	retChan := make(chan hostTokenPathProbeResult, len(pathTasks)+len(activeTasks))
 	done := make(chan struct{})
 	discovered := make([]*url.URL, 0)
 
 	go func() {
-		for result := range retChan {
+		for probeResult := range retChan {
 			if ctx.Err() != nil {
 				break
+			}
+			result := probeResult.result
+
+			// Keep reachable derived roots for later active probes even when their
+			// fingerprints are already known on the source URL.
+			if result.Detect == hostTokenPathDetectName {
+				if parsed, err := url.Parse(result.URL); err == nil {
+					discovered = append(discovered, parsed)
+				}
+			}
+
+			// A hostname-derived URL is a supplementary discovery. Do not emit a
+			// separate result when it only repeats fingerprints already found on
+			// the URL that produced the derived path.
+			if len(result.Fingerprints) > 0 {
+				result.Fingerprints = differentFingerprintMatches(result.Fingerprints, probeResult.knownFingerprints)
+				if len(result.Fingerprints) == 0 {
+					continue
+				}
 			}
 
 			s.mutex.Lock()
@@ -192,12 +218,6 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 			}
 			s.basicURLWithFingerprint[result.URL] = append(s.basicURLWithFingerprint[result.URL], matchedFingerprintNames(result.Fingerprints)...)
 			s.mutex.Unlock()
-
-			if result.Detect == hostTokenPathDetectName {
-				if parsed, err := url.Parse(result.URL); err == nil {
-					discovered = append(discovered, parsed)
-				}
-			}
 
 			detect := result.Detect
 			if detect == "" {
@@ -224,11 +244,11 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 		switch task := raw.(type) {
 		case hostTokenPathProbeTask:
 			if result, ok := s.probeHostTokenPath(ctx, task.base, task.path); ok {
-				retChan <- result
+				retChan <- hostTokenPathProbeResult{result: result, knownFingerprints: task.knownFingerprints}
 			}
 		case hostTokenActivePathProbeTask:
 			if result, ok := s.probeHostTokenActivePath(ctx, task); ok {
-				retChan <- result
+				retChan <- hostTokenPathProbeResult{result: result, knownFingerprints: task.knownFingerprints}
 			}
 		}
 	})
@@ -280,6 +300,7 @@ func (s *FingerScanner) hostTokenPathProbeTasks() []hostTokenPathProbeTask {
 			Scheme: target.Scheme,
 			Host:   target.Host,
 		}
+		knownFingerprints := s.knownFingerprintsForActiveTarget(target, nil)
 		for _, path := range deriveHostTokenPaths(base) {
 			if sameURLPath(target.Path, path) {
 				continue
@@ -291,8 +312,9 @@ func (s *FingerScanner) hostTokenPathProbeTasks() []hostTokenPathProbeTask {
 			}
 			seen[key] = struct{}{}
 			tasks = append(tasks, hostTokenPathProbeTask{
-				base: base,
-				path: path,
+				base:              base,
+				path:              path,
+				knownFingerprints: knownFingerprints,
 			})
 		}
 	}
@@ -320,9 +342,10 @@ func (s *FingerScanner) hostTokenActivePathProbeTasks(prefixTasks []hostTokenPat
 			}
 			seen[fullURL] = struct{}{}
 			tasks = append(tasks, hostTokenActivePathProbeTask{
-				base:    base,
-				path:    path,
-				fingers: fingers,
+				base:              base,
+				path:              path,
+				fingers:           fingers,
+				knownFingerprints: prefixTask.knownFingerprints,
 			})
 		}
 	}
@@ -391,7 +414,7 @@ func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostT
 	var screenshotPath string
 	if s.screenshot && (task.base.Scheme == "https" || task.base.Scheme == "http") {
 		if screenshotPath, err = s.captureScreenshot(ctx, fullURL); err != nil {
-			if s.shouldPrintDefaultOutput() {
+			if s.shouldReportScreenshotDiagnostics() {
 				logger.Default.Warning("%s 截屏失败: %v", fullURL, err)
 			}
 		}
@@ -499,7 +522,7 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 	var screenshotPath string
 	if s.screenshot && (candidateURL.Scheme == "https" || candidateURL.Scheme == "http") {
 		if screenshotPath, err = s.captureScreenshot(ctx, candidate); err != nil {
-			if s.shouldPrintDefaultOutput() {
+			if s.shouldReportScreenshotDiagnostics() {
 				logger.Default.Warning("%s 截屏失败: %v", candidate, err)
 			}
 		}

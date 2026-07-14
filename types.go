@@ -84,23 +84,24 @@ type AssetStorageConfig struct {
 }
 
 type Options struct {
-	Targets              []string
-	Thread               int
-	TimeoutSeconds       int
-	Headers              []string
-	CustomHeaders        string
-	Proxy                string
-	DeepScan             bool
-	RootPath             bool
-	ActiveTimeoutLimit   int
-	EnableScreenshot     bool
-	EnableAssetTagProbe  bool
-	EnableRawResponse    bool
-	DisableDefaultOutput bool
-	FingerprintData      []byte
-	FingerprintPath      string
-	FingerprintFS        fs.FS
-	FingerprintFSName    string
-	FaviconStorage       AssetStorageConfig
-	ScreenshotStorage    AssetStorageConfig
+	Targets               []string
+	Thread                int
+	TimeoutSeconds        int
+	Headers               []string
+	CustomHeaders         string
+	Proxy                 string
+	DeepScan              bool
+	RootPath              bool
+	ActiveTimeoutLimit    int
+	EnableScreenshot      bool
+	ScreenshotDiagnostics bool
+	EnableAssetTagProbe   bool
+	EnableRawResponse     bool
+	DisableDefaultOutput  bool
+	FingerprintData       []byte
+	FingerprintPath       string
+	FingerprintFS         fs.FS
+	FingerprintFSName     string
+	FaviconStorage        AssetStorageConfig
+	ScreenshotStorage     AssetStorageConfig
 }

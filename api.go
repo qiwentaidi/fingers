@@ -72,14 +72,14 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 			if s.screenshot {
 				s.screenshot = false
 			}
-			if s.shouldPrintDefaultOutput() {
+			if s.shouldReportScreenshotDiagnostics() {
 				logger.Default.Warning("[headless] init browser failed, continue with static JS context fallback: %v", err)
 			}
 		} else {
 			s.screenshotBrowser = browser
 			defer func() {
 				s.screenshotBrowser = nil
-				if err := browser.Close(); err != nil && s.shouldPrintDefaultOutput() {
+				if err := browser.Close(); err != nil && s.shouldReportScreenshotDiagnostics() {
 					logger.Default.Warning("[screenshot] close browser failed: %v", err)
 				}
 			}()
