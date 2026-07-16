@@ -15,6 +15,7 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/urfave/cli/v3 v3.10.1
 	github.com/zmap/zcrypto v0.0.0-20240803002437-3a861682ac77
+	golang.org/x/net v0.47.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -29,9 +30,7 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/miekg/dns v1.1.68 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/mod v0.30.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.32.0 // indirect

@@ -399,6 +399,7 @@ func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostT
 	}
 
 	fingerprints := Scan(web, task.fingers)
+	fingerprints = filterInvalidHostTokenFingerprints(resp.StatusCode(), fingerprints)
 	if len(fingerprints) == 0 {
 		return Result{}, false
 	}
@@ -544,4 +545,37 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 
 func isHostTokenPathProbeStatus(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 400
+}
+
+func filterInvalidHostTokenFingerprints(statusCode int, fingerprints []FingerprintMatch) []FingerprintMatch {
+	if statusCode != http.StatusMethodNotAllowed || len(fingerprints) == 0 {
+		return fingerprints
+	}
+
+	filtered := make([]FingerprintMatch, 0, len(fingerprints))
+	for _, fp := range fingerprints {
+		if isInvalidHostTokenWAFMatch(fp) {
+			continue
+		}
+		filtered = append(filtered, fp)
+	}
+	return filtered
+}
+
+func isInvalidHostTokenWAFMatch(fp FingerprintMatch) bool {
+	text := strings.ToLower(fp.Name + " " + fp.Description + " " + fp.MatchedRule)
+	for _, marker := range []string{
+		"waf",
+		"web application firewall",
+		"云防护",
+		"云盾",
+		"防火墙",
+		"应用防火墙",
+		"访问被阻断",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
