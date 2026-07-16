@@ -60,11 +60,6 @@ var publicSuffixHostTokens = map[string]struct{}{
 	"xyz":       {},
 }
 
-var hostTokenPathAliases = map[string][]string{
-	"scjg":  []string{"szjg"},
-	"scjgj": []string{"szjg"},
-}
-
 type hostTokenPathProbeTask struct {
 	base              *url.URL
 	path              string
@@ -126,9 +121,6 @@ func deriveHostTokens(hostname string) []string {
 			return !isHostTokenAlphaNumeric(r)
 		}) {
 			appendHostToken(&tokens, seen, part)
-		}
-		for _, alias := range hostTokenPathAliases[label] {
-			appendHostToken(&tokens, seen, alias)
 		}
 	}
 	return tokens

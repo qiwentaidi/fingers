@@ -90,8 +90,8 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	if needDynamicContext {
 		s.discoverDynamicContextPaths(ctx)
 	}
-	s.HostTokenPathProbe(ctx, callback)
 	if s.deepScan {
+		s.HostTokenPathProbe(ctx, callback)
 		s.ActiveFingerScan(ctx, callback)
 	}
 	return ctx.Err()

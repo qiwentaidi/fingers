@@ -302,7 +302,9 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			body = append(body, redirectBody...)
 			// body = redirectBody
 		}
-		s.storeJSContextPage(finalURL, body)
+		if s.deepScan && len(s.getContextActiveFingerprintDB()) > 0 {
+			s.storeJSContextPage(finalURL, body)
+		}
 		// 网站正常响应
 		title := clients.GetTitle(body)
 		statusCode = resp.StatusCode()
