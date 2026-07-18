@@ -61,11 +61,8 @@ func getFaviconWithStorage(u *url.URL, headers map[string]string, client *resty.
 	resp, err = clients.DoRequest("GET", finalLink, headers, nil, 10, client)
 	if err == nil && resp.StatusCode() == 200 {
 		body := resp.Body()
-		hasher := md5.New()
-		hasher.Write(body)
-		sum := hasher.Sum(nil)
-		result.Mmh3Hash = Mmh3Hash32(body)
-		result.Md5Hash = hex.EncodeToString(sum)
+		result = hashIconBytes(body)
+		result.URL = finalLink
 
 		// 保存favicon到本地，传递favicon URL用于提取扩展名
 		filePath, saveErr := saveFavicon(u.String(), finalLink, body, store)
@@ -187,6 +184,31 @@ func Mmh3Hash32(raw []byte) string {
 		return fmt.Sprint(int32(h32.Sum32()))
 	} else {
 		return "0"
+	}
+}
+
+// hashIconBytes returns the icon hash values used by icon_hash and icon_md5
+// fingerprint rules. It is shared by favicon handling and active image-path
+// probes so a rule path such as /assets/logo.png can itself be fingerprinted.
+func hashIconBytes(body []byte) FaviconResult {
+	hasher := md5.New()
+	_, _ = hasher.Write(body)
+	return FaviconResult{
+		Mmh3Hash: Mmh3Hash32(body),
+		Md5Hash:  hex.EncodeToString(hasher.Sum(nil)),
+	}
+}
+
+func isImagePath(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(u.Path)) {
+	case ".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp":
+		return true
+	default:
+		return false
 	}
 }
 

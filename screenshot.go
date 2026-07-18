@@ -19,13 +19,28 @@ import (
 )
 
 const (
-	screenshotTimeout         = 30 * time.Second
-	screenshotRetryTime       = 1
-	defaultScreenshotMaxTabs  = 10
-	screenshotInitTimeout     = 60 * time.Second
-	dynamicCaptureInitialWait = 4 * time.Second
-	dynamicCaptureTimeout     = 20 * time.Second
+	screenshotTimeout          = 30 * time.Second
+	screenshotRetryTime        = 1
+	defaultScreenshotMaxTabs   = 10
+	screenshotInitTimeout      = 60 * time.Second
+	dynamicCaptureInitialWait  = 4 * time.Second
+	dynamicCaptureTimeout      = 20 * time.Second
+	maxCapturedAPIResponses    = 12
+	maxCapturedAPIResponseSize = 512 * 1024
 )
+
+type capturedAPIResponse struct {
+	URL  string
+	Body []byte
+}
+
+// pageLoadCapture records data produced by one automatic page load. The
+// capture never clicks, types, scrolls, submits forms, or invokes page code.
+type pageLoadCapture struct {
+	RequestURLs  []string
+	DOMURLs      []string
+	APIResponses []capturedAPIResponse
+}
 
 type screenshotBrowser struct {
 	allocCancel   context.CancelFunc
@@ -89,13 +104,25 @@ func newScreenshotBrowser(parent context.Context, maxTabs int, proxy string) (*s
 }
 
 func (b *screenshotBrowser) CaptureNetworkURLs(ctx context.Context, targetURL string) ([]string, error) {
+	capture, err := b.CapturePageLoad(ctx, targetURL)
+	return capture.RequestURLs, err
+}
+
+// CapturePageLoad collects requests, rendered links, and bounded JSON response
+// bodies emitted during the initial navigation of targetURL.
+func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL string) (pageLoadCapture, error) {
+	result := pageLoadCapture{}
+	pageURL, pageURLErr := url.Parse(targetURL)
+	if pageURLErr != nil {
+		return result, pageURLErr
+	}
 	if b == nil || b.browserCtx == nil {
-		return nil, fmt.Errorf("headless browser is not initialized")
+		return result, fmt.Errorf("headless browser is not initialized")
 	}
 	select {
 	case b.tabSlots <- struct{}{}:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return result, ctx.Err()
 	}
 	defer func() { <-b.tabSlots }()
 
@@ -105,30 +132,103 @@ func (b *screenshotBrowser) CaptureNetworkURLs(ctx context.Context, targetURL st
 	defer cancelCapture()
 
 	seen := make(map[string]struct{})
-	urls := make([]string, 0)
+	responseRequests := make(map[network.RequestID]string)
+	finishedResponses := make(map[network.RequestID]struct{})
 	var mu sync.Mutex
 	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
-		request, ok := ev.(*network.EventRequestWillBeSent)
-		if !ok || request == nil || request.Request == nil || !isHTTPURL(request.Request.URL) {
-			return
+		switch event := ev.(type) {
+		case *network.EventRequestWillBeSent:
+			if event == nil || event.Request == nil || !isHTTPURL(event.Request.URL) {
+				return
+			}
+			mu.Lock()
+			if _, exists := seen[event.Request.URL]; !exists {
+				seen[event.Request.URL] = struct{}{}
+				result.RequestURLs = append(result.RequestURLs, event.Request.URL)
+			}
+			mu.Unlock()
+		case *network.EventResponseReceived:
+			if event == nil || event.Response == nil || !isHTTPURL(event.Response.URL) || !isLikelyAPIResponse(event.Response.URL, event.Response.MimeType) {
+				return
+			}
+			responseURL, parseErr := url.Parse(event.Response.URL)
+			if parseErr != nil || !sameContextURL(pageURL, responseURL) {
+				return
+			}
+			mu.Lock()
+			if len(responseRequests) < maxCapturedAPIResponses {
+				responseRequests[event.RequestID] = event.Response.URL
+			}
+			mu.Unlock()
+		case *network.EventLoadingFinished:
+			if event == nil {
+				return
+			}
+			mu.Lock()
+			if _, tracked := responseRequests[event.RequestID]; tracked {
+				finishedResponses[event.RequestID] = struct{}{}
+			}
+			mu.Unlock()
 		}
-		mu.Lock()
-		defer mu.Unlock()
-		if _, exists := seen[request.Request.URL]; exists {
-			return
-		}
-		seen[request.Request.URL] = struct{}{}
-		urls = append(urls, request.Request.URL)
 	})
 
-	if err := chromedp.Run(captureCtx,
+	var domURLs []string
+	err := chromedp.Run(captureCtx,
 		network.Enable(),
 		chromedp.Navigate(targetURL),
 		chromedp.Sleep(dynamicCaptureInitialWait),
-	); err != nil {
-		return urls, err
+		chromedp.Evaluate(`(() => {
+			const values = [];
+			document.querySelectorAll('a[href],area[href],iframe[src],frame[src],link[rel="canonical"][href]').forEach((node) => {
+				values.push(node.href || node.src);
+			});
+			document.querySelectorAll('meta[http-equiv="refresh" i]').forEach((node) => {
+				const match = (node.content || '').match(/(?:^|;)\s*url\s*=\s*(.+)$/i);
+				if (match) values.push(match[1].trim().replace(/^['"]|['"]$/g, ''));
+			});
+			return values.filter(Boolean);
+		})()`, &domURLs),
+	)
+	mu.Lock()
+	requestIDs := make([]network.RequestID, 0, len(finishedResponses))
+	for requestID := range finishedResponses {
+		requestIDs = append(requestIDs, requestID)
 	}
-	return urls, nil
+	mu.Unlock()
+	for _, requestID := range requestIDs {
+		var body []byte
+		bodyErr := chromedp.Run(captureCtx, chromedp.ActionFunc(func(actionCtx context.Context) error {
+			var err error
+			body, err = network.GetResponseBody(requestID).Do(actionCtx)
+			return err
+		}))
+		if bodyErr != nil || len(body) == 0 || len(body) > maxCapturedAPIResponseSize {
+			continue
+		}
+		mu.Lock()
+		responseURL := responseRequests[requestID]
+		mu.Unlock()
+		result.APIResponses = append(result.APIResponses, capturedAPIResponse{URL: responseURL, Body: body})
+	}
+	result.DOMURLs = domURLs
+	return result, err
+}
+
+func isJSONMIMEType(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	return strings.Contains(mimeType, "json") || strings.HasSuffix(mimeType, "+json")
+}
+
+func isLikelyAPIResponse(rawURL string, mimeType string) bool {
+	if isJSONMIMEType(mimeType) {
+		return true
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	return strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/rest/") || strings.HasPrefix(path, "/service/")
 }
 
 func isHTTPURL(raw string) bool {

@@ -65,8 +65,8 @@ func loadFingerprintRepository(options Options) (*FingerprintRepository, error) 
 }
 
 func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error {
-	needDynamicContext := s.deepScan && len(s.getContextActiveFingerprintDB()) > 0
-	if s.screenshot || needDynamicContext {
+	needInitialLoadDiscovery := s.deepScan
+	if s.screenshot || needInitialLoadDiscovery {
 		browser, err := newScreenshotBrowser(ctx, defaultScreenshotMaxTabs, s.proxy)
 		if err != nil {
 			if s.screenshot {
@@ -87,10 +87,9 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	}
 
 	s.FingerScan(ctx, callback)
-	if needDynamicContext {
-		s.discoverDynamicContextPaths(ctx)
-	}
 	if s.deepScan {
+		s.discoverDynamicContextPaths(ctx)
+		s.scanDiscoveredPages(ctx, callback)
 		s.HostTokenPathProbe(ctx, callback)
 		s.ActiveFingerScan(ctx, callback)
 	}

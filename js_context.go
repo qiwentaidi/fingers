@@ -17,6 +17,7 @@ import (
 
 const (
 	contextActiveDetectName   = "ActiveContext"
+	contextShiroDetectName    = "ActiveContextShiro"
 	maxJSContextResourceBytes = 2 * 1024 * 1024
 	maxJSContextPaths         = 4
 )
@@ -265,11 +266,8 @@ func deriveJSContextPaths(evidence []jsContextEvidence) []string {
 				if !apiContextSegmentPattern.MatchString(segment) {
 					continue
 				}
-				if current := statFor("/" + strings.Join(segments[:index+1], "/")); current != nil {
-					current.apiHits++
-				}
-				if index+1 < len(segments) && versionSegmentPattern.MatchString(segments[index+1]) {
-					if current := statFor("/" + strings.Join(segments[:index+2], "/")); current != nil {
+				for _, candidate := range apiContextRootCandidates(segments, index) {
+					if current := statFor(candidate); current != nil {
 						current.apiHits++
 					}
 				}
@@ -315,9 +313,8 @@ func deriveJSContextPaths(evidence []jsContextEvidence) []string {
 // are eligible for context-enabled active fingerprint probes.
 func deriveAPIContextPaths(rawPaths []string) []string {
 	blacklist := []string{"proxy", "jsonp", "callback", "tk", "map", "military", "static", "resource", "google", "baidu"}
-	allowSimple := regexp.MustCompile(`(?i)^/(?:api(?:[-_/].*)?|v\d+|rest|service|backend|graphql)(/)?$`)
+	allowSimple := regexp.MustCompile(`(?i)^/(?:api|v\d+|rest|service|backend|graphql)/?$`)
 	segmentAPI := regexp.MustCompile(`(?i)^(?:api|[a-z0-9]+[-_]?api|api[-_a-z0-9]+)$`)
-	version := regexp.MustCompile(`(?i)^v?\d+$`)
 	seen := make(map[string]struct{})
 	roots := make([]string, 0)
 	appendRoot := func(value string) {
@@ -358,9 +355,8 @@ func deriveAPIContextPaths(rawPaths []string) []string {
 			if !segmentAPI.MatchString(segment) {
 				continue
 			}
-			appendRoot("/" + strings.Join(segments[:index+1], "/"))
-			if index+1 < len(segments) && version.MatchString(segments[index+1]) {
-				appendRoot("/" + strings.Join(segments[:index+2], "/"))
+			for _, candidate := range apiContextRootCandidates(segments, index) {
+				appendRoot(candidate)
 			}
 			break
 		}
@@ -368,6 +364,27 @@ func deriveAPIContextPaths(rawPaths []string) []string {
 
 	sort.Strings(roots)
 	return roots
+}
+
+// apiContextRootCandidates returns every deployable context prefix that leads
+// to a recognized API segment. For example, /gateway/api/v1/users yields
+// /gateway, /gateway/api, and /gateway/api/v1 so active rules can be probed
+// beneath reverse-proxy contexts as well as the API root itself.
+func apiContextRootCandidates(segments []string, apiIndex int) []string {
+	if apiIndex < 0 || apiIndex >= len(segments) {
+		return nil
+	}
+
+	last := apiIndex + 1
+	if last < len(segments) && versionSegmentPattern.MatchString(segments[last]) {
+		last++
+	}
+
+	candidates := make([]string, 0, last)
+	for end := 1; end <= last; end++ {
+		candidates = append(candidates, "/"+strings.Join(segments[:end], "/"))
+	}
+	return candidates
 }
 
 func (s *FingerScanner) storeJSContextPaths(target *url.URL, candidates []string) {

@@ -303,6 +303,11 @@ func dataCheckInt(op int16, dataSource int, dataRule int) bool {
 		if dataSource != dataRule {
 			return true
 		}
+	// 数字精确相等
+	case 2:
+		if dataSource == dataRule {
+			return true
+		}
 	// 大于等于
 	case 3:
 		if dataSource >= dataRule {

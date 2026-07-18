@@ -194,14 +194,18 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 				}
 			}
 
+			// A reachable hostname-derived path is useful as an active-scan base,
+			// but it is not a fingerprint result unless it actually matched one.
+			if len(result.Fingerprints) == 0 {
+				continue
+			}
+
 			// A hostname-derived URL is a supplementary discovery. Do not emit a
 			// separate result when it only repeats fingerprints already found on
 			// the URL that produced the derived path.
-			if len(result.Fingerprints) > 0 {
-				result.Fingerprints = differentFingerprintMatches(result.Fingerprints, probeResult.knownFingerprints)
-				if len(result.Fingerprints) == 0 {
-					continue
-				}
+			result.Fingerprints = differentFingerprintMatches(result.Fingerprints, probeResult.knownFingerprints)
+			if len(result.Fingerprints) == 0 {
+				continue
 			}
 
 			s.mutex.Lock()
@@ -386,6 +390,10 @@ func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostT
 	server := resp.Header().Get("Server")
 	contentType := resp.Header().Get("Content-Type")
 	headers, _, _ := httputil.DumpResponseHeadersAndRaw(resp.RawResponse)
+	iconResult := FaviconResult{}
+	if isImagePath(fullURL) {
+		iconResult = hashIconBytes(body)
+	}
 	web := &WebInfo{
 		HeadeString:   strings.ToLower(string(headers)),
 		ContentType:   strings.ToLower(contentType),
@@ -396,6 +404,8 @@ func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostT
 		ContentLength: len(resp.Body()),
 		Port:          httputil.GetPort(task.base),
 		StatusCode:    resp.StatusCode(),
+		IconHash:      iconResult.Mmh3Hash,
+		IconMd5:       iconResult.Md5Hash,
 	}
 
 	fingerprints := Scan(web, task.fingers)
@@ -431,6 +441,8 @@ func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostT
 		Fingerprints: fingerprints,
 		Detect:       hostTokenActivePathName,
 		Screenshot:   screenshotPath,
+		IconHash:     iconResult.Mmh3Hash,
+		IconMd5:      iconResult.Md5Hash,
 		RawResponse:  rawResponse,
 	}, true
 }
