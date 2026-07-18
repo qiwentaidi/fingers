@@ -189,10 +189,11 @@ func dumpRawResponsePacket(resp *resty.Response) string {
 }
 
 type passiveScanTarget struct {
-	URL          *url.URL
-	Detect       string
-	RecordAlive  bool
-	CaptureImage bool
+	URL               *url.URL
+	Detect            string
+	RecordAlive       bool
+	CaptureImage      bool
+	KnownFingerprints []string
 }
 
 // FingerScan 执行初始目标的指纹扫描。
@@ -391,6 +392,15 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 			fingerprints = []FingerprintMatch{{
 				Name: "疑似蜜罐",
 			}}
+		}
+		if len(scanTarget.KnownFingerprints) > 0 {
+			fingerprints = differentFingerprintMatches(fingerprints, scanTarget.KnownFingerprints)
+			// A discovered page that adds no new fingerprint is intentionally
+			// omitted from output and callbacks. It remains a one-level probe,
+			// not a duplicate presentation of the root URL's technology stack.
+			if len(fingerprints) == 0 {
+				return
+			}
 		}
 
 		// 在截屏前检查 context（截屏是耗时操作）

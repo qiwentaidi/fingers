@@ -329,6 +329,7 @@ func (s *FingerScanner) scanDiscoveredPages(ctx context.Context, callback Result
 	seen := make(map[string]struct{})
 	targets := make([]passiveScanTarget, 0)
 	for _, target := range s.aliveURLs {
+		knownFingerprints := s.knownFingerprintsForActiveTarget(target, target)
 		for _, candidate := range s.discoveredPagesForTarget(target) {
 			if _, exists := seen[candidate.URL]; exists {
 				continue
@@ -338,7 +339,11 @@ func (s *FingerScanner) scanDiscoveredPages(ctx context.Context, callback Result
 				continue
 			}
 			seen[candidate.URL] = struct{}{}
-			targets = append(targets, passiveScanTarget{URL: parsed, Detect: candidate.Detect})
+			targets = append(targets, passiveScanTarget{
+				URL:               parsed,
+				Detect:            candidate.Detect,
+				KnownFingerprints: knownFingerprints,
+			})
 		}
 	}
 	if len(targets) > 0 {
