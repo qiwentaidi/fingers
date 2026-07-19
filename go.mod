@@ -10,7 +10,7 @@ require (
 	github.com/chromedp/chromedp v0.14.1
 	github.com/go-resty/resty/v2 v2.17.1
 	github.com/panjf2000/ants/v2 v2.11.3
-	github.com/qiwentaidi/clients v0.0.5
+	github.com/qiwentaidi/clients v0.0.7
 	github.com/qiwentaidi/utils v0.0.5
 	github.com/twmb/murmur3 v1.1.8
 	github.com/urfave/cli/v3 v3.10.1

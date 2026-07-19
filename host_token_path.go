@@ -2,6 +2,9 @@ package fingers
 
 import (
 	"context"
+	"crypto/md5"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/url"
@@ -74,8 +77,29 @@ type hostTokenActivePathProbeTask struct {
 }
 
 type hostTokenPathProbeResult struct {
-	result            Result
-	knownFingerprints []string
+	task          hostTokenPathProbeTask
+	probed        bool
+	reachable     bool
+	entryStatus   int
+	finalStatus   int
+	candidateURL  *url.URL
+	finalURL      *url.URL
+	body          []byte
+	contentLength int
+	server        string
+	contentType   string
+	headers       []byte
+	rawResponse   string
+	fingerprint   hostTokenResponseFingerprint
+}
+
+// hostTokenResponseFingerprint is deliberately small and comparable. It is
+// used only to recognize the same response template within a single scan, not
+// as a security primitive.
+type hostTokenResponseFingerprint struct {
+	contentType string
+	bodyLength  int
+	bodyMD5     [md5.Size]byte
 }
 
 func deriveHostTokenPaths(u *url.URL) []string {
@@ -172,90 +196,121 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 	if len(pathTasks) == 0 {
 		return
 	}
-	activeTasks := s.hostTokenActivePathProbeTasks(pathTasks)
-
-	var wg sync.WaitGroup
-	retChan := make(chan hostTokenPathProbeResult, len(pathTasks)+len(activeTasks))
-	done := make(chan struct{})
+	baselines := s.hostTokenSoft404Baselines(ctx, pathTasks)
+	prefixResults := s.probeHostTokenPaths(ctx, pathTasks)
 	discovered := make([]*url.URL, 0)
+	localFanoutTasks := make([]hostTokenPathProbeTask, 0)
 
-	go func() {
-		for probeResult := range retChan {
-			if ctx.Err() != nil {
-				break
-			}
-			result := probeResult.result
+	for _, probeResult := range prefixResults {
+		if ctx.Err() != nil {
+			break
+		}
 
-			// Keep reachable derived roots for later active probes even when their
-			// fingerprints are already known on the source URL.
-			if result.Detect == hostTokenPathDetectName {
+		// A successful derived root that is indistinguishable from a random
+		// missing path is a SPA shell or reverse-proxy catch-all. Do not promote
+		// it to aliveURLs and, crucially, do not fan out active path probes below
+		// it.
+		if s.isHostTokenSoft404(probeResult, baselines) {
+			continue
+		}
+
+		if probeResult.probed && probeResult.reachable {
+			if result, ok := s.hydrateHostTokenPathResult(ctx, probeResult); ok {
+				// Reachable, non-catch-all roots are scanned by ActiveFingerScan after
+				// this method returns. Scheduling them here as well used to issue the
+				// same active-path requests twice.
 				if parsed, err := url.Parse(result.URL); err == nil {
 					discovered = append(discovered, parsed)
 				}
-			}
-
-			// A reachable hostname-derived path is useful as an active-scan base,
-			// but it is not a fingerprint result unless it actually matched one.
-			if len(result.Fingerprints) == 0 {
+				s.handleHostTokenPathResult(ctx, callback, result, probeResult.task.knownFingerprints)
 				continue
-			}
-
-			// A hostname-derived URL is a supplementary discovery. Do not emit a
-			// separate result when it only repeats fingerprints already found on
-			// the URL that produced the derived path.
-			result.Fingerprints = differentFingerprintMatches(result.Fingerprints, probeResult.knownFingerprints)
-			if len(result.Fingerprints) == 0 {
-				continue
-			}
-
-			s.mutex.Lock()
-			if s.basicURLWithFingerprint == nil {
-				s.basicURLWithFingerprint = make(map[string][]string)
-			}
-			s.basicURLWithFingerprint[result.URL] = append(s.basicURLWithFingerprint[result.URL], matchedFingerprintNames(result.Fingerprints)...)
-			s.mutex.Unlock()
-
-			detect := result.Detect
-			if detect == "" {
-				detect = hostTokenPathDetectName
-			}
-			s.logScanResult(detect, result)
-			if callback != nil && ctx.Err() == nil {
-				callback(result)
 			}
 		}
-		close(done)
-	}()
 
+		// Preserve the important existing behavior for hard 404s and uncertain
+		// responses: a missing context root can still contain a real application
+		// at a deeper fingerprint path.
+		localFanoutTasks = append(localFanoutTasks, probeResult.task)
+	}
+
+	activeTasks := s.hostTokenActivePathProbeTasks(localFanoutTasks)
+	s.probeHostTokenActivePaths(ctx, activeTasks, callback)
+
+	if len(discovered) > 0 {
+		s.aliveURLs = append(s.aliveURLs, discovered...)
+	}
+}
+
+func (s *FingerScanner) probeHostTokenPaths(ctx context.Context, tasks []hostTokenPathProbeTask) []hostTokenPathProbeResult {
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	retChan := make(chan hostTokenPathProbeResult, len(tasks))
 	thread := s.thread
 	if thread <= 0 {
 		thread = 1
 	}
 	threadPool, err := ants.NewPoolWithFunc(thread, func(raw interface{}) {
 		defer wg.Done()
-		if ctx.Err() != nil {
-			return
-		}
+		task := raw.(hostTokenPathProbeTask)
+		retChan <- s.probeHostTokenPathResponse(ctx, task)
+	})
+	if err != nil {
+		return nil
+	}
+	defer threadPool.Release()
 
-		switch task := raw.(type) {
-		case hostTokenPathProbeTask:
-			if result, ok := s.probeHostTokenPath(ctx, task.base, task.path); ok {
-				retChan <- hostTokenPathProbeResult{result: result, knownFingerprints: task.knownFingerprints}
-			}
-		case hostTokenActivePathProbeTask:
-			if result, ok := s.probeHostTokenActivePath(ctx, task); ok {
-				retChan <- hostTokenPathProbeResult{result: result, knownFingerprints: task.knownFingerprints}
-			}
+	for _, task := range tasks {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		if err := threadPool.Invoke(task); err != nil {
+			wg.Done()
+		}
+	}
+	wg.Wait()
+	close(retChan)
+
+	results := make([]hostTokenPathProbeResult, 0, len(tasks))
+	for result := range retChan {
+		results = append(results, result)
+	}
+	return results
+}
+
+func (s *FingerScanner) probeHostTokenActivePaths(ctx context.Context, tasks []hostTokenActivePathProbeTask, callback ResultCallback) {
+	if len(tasks) == 0 || ctx.Err() != nil {
+		return
+	}
+
+	var wg sync.WaitGroup
+	resultChan := make(chan struct {
+		result Result
+		known  []string
+	}, len(tasks))
+	thread := s.thread
+	if thread <= 0 {
+		thread = 1
+	}
+	threadPool, err := ants.NewPoolWithFunc(thread, func(raw interface{}) {
+		defer wg.Done()
+		task := raw.(hostTokenActivePathProbeTask)
+		if result, ok := s.probeHostTokenActivePath(ctx, task); ok {
+			resultChan <- struct {
+				result Result
+				known  []string
+			}{result: result, known: task.knownFingerprints}
 		}
 	})
 	if err != nil {
-		close(retChan)
-		<-done
 		return
 	}
 	defer threadPool.Release()
 
-	for _, task := range pathTasks {
+	for _, task := range tasks {
 		if ctx.Err() != nil {
 			break
 		}
@@ -264,22 +319,10 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 			wg.Done()
 		}
 	}
-	for _, task := range activeTasks {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		if err := threadPool.Invoke(task); err != nil {
-			wg.Done()
-		}
-	}
-
 	wg.Wait()
-	close(retChan)
-	<-done
-
-	if len(discovered) > 0 {
-		s.aliveURLs = append(s.aliveURLs, discovered...)
+	close(resultChan)
+	for item := range resultChan {
+		s.handleHostTokenPathResult(ctx, callback, item.result, item.known)
 	}
 }
 
@@ -447,18 +490,22 @@ func (s *FingerScanner) probeHostTokenActivePath(ctx context.Context, task hostT
 	}, true
 }
 
-func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, candidatePath string) (Result, bool) {
-	if base == nil || ctx.Err() != nil {
-		return Result{}, false
+func (s *FingerScanner) probeHostTokenPathResponse(ctx context.Context, task hostTokenPathProbeTask) hostTokenPathProbeResult {
+	result := hostTokenPathProbeResult{task: task}
+	if task.base == nil || ctx.Err() != nil {
+		return result
 	}
 
-	candidateURL := buildHostTokenPathURL(base, candidatePath)
+	candidateURL := buildHostTokenPathURL(task.base, task.path)
+	result.candidateURL = candidateURL
 	candidate := candidateURL.String()
 	entryResp, err := clients.DoRequest("GET", candidate, s.headers, nil, hostTokenPathProbeTimeout, s.notFollowClient)
-	if err != nil || entryResp == nil || !isHostTokenPathProbeStatus(entryResp.StatusCode()) {
-		return Result{}, false
+	if err != nil || entryResp == nil {
+		return result
 	}
 
+	result.probed = true
+	result.entryStatus = entryResp.StatusCode()
 	rawResponse := ""
 	if s.enableRawResponse {
 		rawResponse = dumpRawResponsePacket(entryResp)
@@ -468,7 +515,7 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 	if entryResp.StatusCode() >= 300 && entryResp.StatusCode() < 400 {
 		finalResp, err = clients.DoRequest("GET", candidate, s.headers, nil, hostTokenPathProbeTimeout, s.client)
 		if err != nil || finalResp == nil {
-			return Result{}, false
+			return result
 		}
 		if s.enableRawResponse {
 			if finalRawResponse := dumpRawResponsePacket(finalResp); finalRawResponse != "" {
@@ -479,71 +526,90 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 			}
 		}
 	}
-
-	if !isHostTokenPathProbeStatus(finalResp.StatusCode()) || ctx.Err() != nil {
-		return Result{}, false
+	if ctx.Err() != nil {
+		return result
 	}
 
-	finalURL := candidateURL
+	result.finalStatus = finalResp.StatusCode()
+	result.reachable = isHostTokenPathProbeStatus(result.finalStatus)
+	result.finalURL = candidateURL
 	if finalResp.RawResponse != nil && finalResp.RawResponse.Request != nil && finalResp.RawResponse.Request.URL != nil {
-		finalURL = finalResp.RawResponse.Request.URL
+		result.finalURL = finalResp.RawResponse.Request.URL
 	}
-	faviconResult := getFaviconWithStorage(finalURL, s.headers, s.client, s.faviconStore)
 
-	body := httputil.LimitResponseBytes(finalResp.Body(), maxInfoReponseSize)
-	title := clients.GetTitle(body)
-	if exclude, _ := excludeInterference(finalResp.StatusCode(), title); exclude {
+	responseBody := finalResp.Body()
+	result.body = httputil.LimitResponseBytes(responseBody, maxInfoReponseSize)
+	result.contentLength = len(responseBody)
+	result.server = finalResp.Header().Get("Server")
+	result.contentType = finalResp.Header().Get("Content-Type")
+	result.headers, _, _ = httputil.DumpResponseHeadersAndRaw(finalResp.RawResponse)
+	result.rawResponse = rawResponse
+	result.fingerprint = newHostTokenResponseFingerprint(result.contentType, result.body, result.contentLength)
+	return result
+}
+
+// probeHostTokenPath preserves the focused, fully-hydrated probe used by
+// callers and tests. HostTokenPathProbe itself uses probeHostTokenPathResponse
+// first so it can decide whether the path deserves the expensive work.
+func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, candidatePath string) (Result, bool) {
+	return s.hydrateHostTokenPathResult(ctx, s.probeHostTokenPathResponse(ctx, hostTokenPathProbeTask{
+		base: base,
+		path: candidatePath,
+	}))
+}
+
+func (s *FingerScanner) hydrateHostTokenPathResult(ctx context.Context, probe hostTokenPathProbeResult) (Result, bool) {
+	if !probe.probed || !probe.reachable || probe.candidateURL == nil || probe.finalURL == nil || ctx.Err() != nil {
 		return Result{}, false
 	}
 
-	server := finalResp.Header().Get("Server")
-	contentType := finalResp.Header().Get("Content-Type")
-	headers, _, _ := httputil.DumpResponseHeadersAndRaw(finalResp.RawResponse)
+	title := clients.GetTitle(probe.body)
+	if exclude, _ := excludeInterference(probe.finalStatus, title); exclude {
+		return Result{}, false
+	}
+	faviconResult := getFaviconWithStorage(probe.finalURL, s.headers, s.client, s.faviconStore)
 	web := &WebInfo{
-		HeadeString:   strings.ToLower(string(headers)),
-		ContentType:   strings.ToLower(contentType),
-		BodyString:    strings.ToLower(string(body)),
-		Path:          strings.ToLower(candidatePath),
+		HeadeString:   strings.ToLower(string(probe.headers)),
+		ContentType:   strings.ToLower(probe.contentType),
+		BodyString:    strings.ToLower(string(probe.body)),
+		Path:          strings.ToLower(probe.task.path),
 		Title:         strings.ToLower(title),
-		Server:        strings.ToLower(server),
-		ContentLength: len(finalResp.Body()),
-		Port:          httputil.GetPort(candidateURL),
-		StatusCode:    entryResp.StatusCode(),
+		Server:        strings.ToLower(probe.server),
+		ContentLength: probe.contentLength,
+		Port:          httputil.GetPort(probe.candidateURL),
+		StatusCode:    probe.entryStatus,
 		IconHash:      faviconResult.Mmh3Hash,
 		IconMd5:       faviconResult.Md5Hash,
 	}
 
-	var fingerprintDB []FingerEntity
-	if s.fingerprintRepo != nil {
-		fingerprintDB = s.fingerprintRepo.GetFingerprintDB()
-	}
-	fingerprints := Scan(web, fingerprintDB)
+	fingerprints := Scan(web, s.getFingerprintDB())
 	if checkHoneypotWithHeaders(web.HeadeString) {
-		fingerprints = []FingerprintMatch{{
-			Name: "疑似蜜罐",
-		}}
+		fingerprints = []FingerprintMatch{{Name: "疑似蜜罐"}}
 	}
 
 	var screenshotPath string
-	if s.screenshot && (candidateURL.Scheme == "https" || candidateURL.Scheme == "http") {
-		if screenshotPath, err = s.captureScreenshot(ctx, candidate); err != nil {
+	if s.screenshot && (probe.candidateURL.Scheme == "https" || probe.candidateURL.Scheme == "http") {
+		capturedPath, err := s.captureScreenshot(ctx, probe.candidateURL.String())
+		if err != nil {
 			if s.shouldReportScreenshotDiagnostics() {
-				logger.Default.Warning("%s 截屏失败: %v", candidate, err)
+				logger.Default.Warning("%s 截屏失败: %v", probe.candidateURL.String(), err)
 			}
+		} else {
+			screenshotPath = capturedPath
 		}
 	}
 
 	return Result{
-		URL:          candidate,
-		Scheme:       candidateURL.Scheme,
-		Host:         candidateURL.Host,
+		URL:          probe.candidateURL.String(),
+		Scheme:       probe.candidateURL.Scheme,
+		Host:         probe.candidateURL.Host,
 		Port:         web.Port,
 		StatusCode:   web.StatusCode,
 		Length:       web.ContentLength,
 		Title:        title,
-		Server:       server,
-		ContentType:  contentType,
-		Path:         candidatePath,
+		Server:       probe.server,
+		ContentType:  probe.contentType,
+		Path:         probe.task.path,
 		Fingerprints: fingerprints,
 		Detect:       hostTokenPathDetectName,
 		Screenshot:   screenshotPath,
@@ -551,8 +617,91 @@ func (s *FingerScanner) probeHostTokenPath(ctx context.Context, base *url.URL, c
 		FaviconURL:   faviconResult.URL,
 		IconHash:     faviconResult.Mmh3Hash,
 		IconMd5:      faviconResult.Md5Hash,
-		RawResponse:  rawResponse,
+		RawResponse:  probe.rawResponse,
 	}, true
+}
+
+func newHostTokenResponseFingerprint(contentType string, body []byte, contentLength int) hostTokenResponseFingerprint {
+	return hostTokenResponseFingerprint{
+		contentType: strings.ToLower(strings.TrimSpace(contentType)),
+		bodyLength:  contentLength,
+		bodyMD5:     md5.Sum(body),
+	}
+}
+
+func (s *FingerScanner) hostTokenSoft404Baselines(ctx context.Context, tasks []hostTokenPathProbeTask) map[string]hostTokenResponseFingerprint {
+	baselines := make(map[string]hostTokenResponseFingerprint)
+	for _, task := range tasks {
+		if ctx.Err() != nil || task.base == nil {
+			break
+		}
+		origin := hostTokenOriginKey(task.base)
+		if _, exists := baselines[origin]; exists {
+			continue
+		}
+		probeURL := buildHostTokenPathURL(task.base, hostTokenSoft404ProbePath())
+		resp, err := clients.DoRequest("GET", probeURL.String(), s.headers, nil, hostTokenPathProbeTimeout, s.client)
+		if err != nil || resp == nil || !isHostTokenPathProbeStatus(resp.StatusCode()) {
+			continue
+		}
+		responseBody := resp.Body()
+		body := httputil.LimitResponseBytes(responseBody, maxInfoReponseSize)
+		// Empty success responses are too weak a signal to prune a candidate.
+		if len(body) == 0 {
+			continue
+		}
+		baselines[origin] = newHostTokenResponseFingerprint(resp.Header().Get("Content-Type"), body, len(responseBody))
+	}
+	return baselines
+}
+
+func (s *FingerScanner) isHostTokenSoft404(result hostTokenPathProbeResult, baselines map[string]hostTokenResponseFingerprint) bool {
+	if !result.probed || !result.reachable || result.candidateURL == nil || len(result.body) == 0 {
+		return false
+	}
+	baseline, exists := baselines[hostTokenOriginKey(result.candidateURL)]
+	return exists && result.fingerprint == baseline
+}
+
+func hostTokenOriginKey(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+}
+
+func hostTokenSoft404ProbePath() string {
+	bytes := make([]byte, 12)
+	if _, err := cryptorand.Read(bytes); err == nil {
+		return "/.fingers-soft404-probe-" + hex.EncodeToString(bytes) + "/"
+	}
+	return "/.fingers-soft404-probe/"
+}
+
+func (s *FingerScanner) handleHostTokenPathResult(ctx context.Context, callback ResultCallback, result Result, knownFingerprints []string) {
+	if ctx.Err() != nil || len(result.Fingerprints) == 0 {
+		return
+	}
+	result.Fingerprints = differentFingerprintMatches(result.Fingerprints, knownFingerprints)
+	if len(result.Fingerprints) == 0 {
+		return
+	}
+
+	s.mutex.Lock()
+	if s.basicURLWithFingerprint == nil {
+		s.basicURLWithFingerprint = make(map[string][]string)
+	}
+	s.basicURLWithFingerprint[result.URL] = append(s.basicURLWithFingerprint[result.URL], matchedFingerprintNames(result.Fingerprints)...)
+	s.mutex.Unlock()
+
+	detect := result.Detect
+	if detect == "" {
+		detect = hostTokenPathDetectName
+	}
+	s.logScanResult(detect, result)
+	if callback != nil && ctx.Err() == nil {
+		callback(result)
+	}
 }
 
 func isHostTokenPathProbeStatus(statusCode int) bool {

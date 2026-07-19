@@ -71,6 +71,7 @@ type FingerScanner struct {
 	pageContextBodies        map[string][]byte
 	pageDiscoveryMutex       sync.Mutex
 	discoveredPageCandidates map[string]map[string]pageCandidate
+	automaticShiroEndpoints  map[string]map[string]*url.URL
 }
 
 func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore assetStore, screenshotStore assetStore) *FingerScanner {
@@ -477,7 +478,7 @@ type ActiveFingerDetect struct {
 	Path              string
 	Detect            string
 	KnownFingerprints []string
-	ShiroContextProbe bool
+	ShiroProbe        bool
 }
 
 // 让每一个路径都只绑定一个实体
@@ -574,8 +575,8 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		if fp.URL == nil {
 			return
 		}
-		if fp.ShiroContextProbe {
-			if result, ok := s.probeContextShiro(ctx, fp); ok {
+		if fp.ShiroProbe {
+			if result, ok := s.probeShiroEndpoint(ctx, fp); ok {
 				retChan <- result
 			}
 			return
@@ -775,10 +776,10 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 					wg.Add(1)
 					s.IncreaseActiveProgress(&id, count)
 					if err := threadPool.Invoke(ActiveFingerDetect{
-						URL:               contextTarget,
-						Fpe:               fullFingerprintDB,
-						Detect:            contextShiroDetectName,
-						ShiroContextProbe: true,
+						URL:        contextTarget,
+						Fpe:        fullFingerprintDB,
+						Detect:     contextShiroDetectName,
+						ShiroProbe: true,
 					}); err != nil {
 						wg.Done()
 					}
@@ -810,6 +811,32 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 					Fpe:    fingers,
 					Path:   path,
 					Detect: contextActiveDetectName,
+				}); err != nil {
+					wg.Done()
+				}
+			}
+		}
+
+		// Probe only concrete, same-origin authentication endpoints that were
+		// observed during the initial browser page load. They intentionally do
+		// not participate in ordinary active-path scanning or page discovery.
+		if contextShiroProbeEnabled {
+			for _, endpoint := range s.automaticShiroEndpointsForTarget(target) {
+				if endpoint == nil {
+					continue
+				}
+				probeURL := endpoint.String()
+				if _, exists := contextShiroProbeURLs[probeURL]; exists {
+					continue
+				}
+				contextShiroProbeURLs[probeURL] = struct{}{}
+				wg.Add(1)
+				s.IncreaseActiveProgress(&id, count)
+				if err := threadPool.Invoke(ActiveFingerDetect{
+					URL:        endpoint,
+					Fpe:        fullFingerprintDB,
+					Detect:     automaticAPIShiroDetect,
+					ShiroProbe: true,
 				}); err != nil {
 					wg.Done()
 				}
@@ -996,6 +1023,18 @@ func (s *FingerScanner) ActiveCounts() int {
 				}
 				contextProbeURLs[probeURL] = struct{}{}
 				total++
+			}
+		}
+		if contextShiroProbeEnabled {
+			seenAutomaticEndpoints := make(map[string]struct{})
+			for _, endpoint := range s.automaticShiroEndpointsForTarget(target) {
+				if endpoint == nil {
+					continue
+				}
+				if _, exists := seenAutomaticEndpoints[endpoint.String()]; !exists {
+					seenAutomaticEndpoints[endpoint.String()] = struct{}{}
+					total++
+				}
 			}
 		}
 	}
@@ -1286,9 +1325,9 @@ func filterShiroFingerprints(fingerprints []FingerprintMatch) []FingerprintMatch
 	return filtered
 }
 
-// probeContextShiro runs a Shiro probe on the JS-discovered context root only.
-// It intentionally does not append any active-fingerprint path to that root.
-func (s *FingerScanner) probeContextShiro(ctx context.Context, fp ActiveFingerDetect) (Result, bool) {
+// probeShiroEndpoint runs the rememberMe probe on a discovered context root or
+// a concrete endpoint that was automatically requested by the initial page.
+func (s *FingerScanner) probeShiroEndpoint(ctx context.Context, fp ActiveFingerDetect) (Result, bool) {
 	if ctx.Err() != nil || fp.URL == nil {
 		return Result{}, false
 	}
@@ -1329,7 +1368,7 @@ func (s *FingerScanner) probeContextShiro(ctx context.Context, fp ActiveFingerDe
 		ContentType:  resp.Header().Get("Content-Type"),
 		Path:         fp.URL.Path,
 		Fingerprints: fingerprints,
-		Detect:       contextShiroDetectName,
+		Detect:       fp.Detect,
 		Port:         web.Port,
 		Scheme:       fp.URL.Scheme,
 		Host:         fp.URL.Host,

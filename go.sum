@@ -64,6 +64,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/qiwentaidi/clients v0.0.5 h1:lhtosU+hGgGLP7CBvu1yBAiJYbm5pz9IexIoyA1LXyA=
 github.com/qiwentaidi/clients v0.0.5/go.mod h1:SW/Qn8/jtuMvifNju8BhRSCHkzqsYmrDNrf2f0VoaXA=
+github.com/qiwentaidi/clients v0.0.7 h1:mYawy0QGEikPxyzGiEqCfOkYRlV7Wu1oBn2M+NvxpXw=
+github.com/qiwentaidi/clients v0.0.7/go.mod h1:SW/Qn8/jtuMvifNju8BhRSCHkzqsYmrDNrf2f0VoaXA=
 github.com/qiwentaidi/utils v0.0.5 h1:4UdKxbJm3K0Byk8CLxgURFCSL4bc8Y8H6yljv314ows=
 github.com/qiwentaidi/utils v0.0.5/go.mod h1:f5vUD4upAFeGm/oVqSNhzZOo83ft8YXd5hRjscfKM2o=
 github.com/sirupsen/logrus v1.3.0/go.mod h1:LxeOpSwHxABJmUn/MG1IvRgCAasNZTLOkJPxbbu5VWo=
