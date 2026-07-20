@@ -396,12 +396,13 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 		}
 		if len(scanTarget.KnownFingerprints) > 0 {
 			fingerprints = differentFingerprintMatches(fingerprints, scanTarget.KnownFingerprints)
-			// A discovered page that adds no new fingerprint is intentionally
-			// omitted from output and callbacks. It remains a one-level probe,
-			// not a duplicate presentation of the root URL's technology stack.
-			if len(fingerprints) == 0 {
-				return
-			}
+		}
+		// A discovered page is only useful when it contributes a fingerprint.
+		// In particular, JS route extraction often yields client-side routes that
+		// the server answers with a plain 404 page; reporting those as fingerprint
+		// results produces noisy false discoveries.
+		if scanTarget.Detect != "" && scanTarget.Detect != "Default" && len(fingerprints) == 0 {
+			return
 		}
 
 		// 在截屏前检查 context（截屏是耗时操作）
