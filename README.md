@@ -202,6 +202,35 @@ err = engine.Scan(ctx, func(result fingers.Result) {
 
 指纹规则除了 `rule` 命中判断外，还支持 `extract` 提取匹配内容。提取只会在该指纹命中后执行。
 
+规则也支持使用 `len(body)` 判断实际响应体长度，例如：
+
+```yaml
+EJB:
+  - name: EJB Server
+    path:
+      - /ejbserver/ejb
+    rule:
+      - 'len(body) == 0 && status="200"'
+```
+
+这里的长度是程序读取到的响应体字节长度，不是 `Content-Length` 响应头的值。包含 `path` 的规则需要开启主动扫描（CLI 使用 `--deep`）。
+
+对于需要多个路径共同命中的指纹，可以使用 `path_rules`。不同 `path_rules` 条目之间按 AND 处理；同一个条目下的多个 `rule` 表达式沿用现有语义，任意一个命中即可。`path_rules` 不支持随机路径占位符：
+
+```yaml
+EJB:
+  - name: EJB Server
+    path_rules:
+      - path: /ejbserver/ejb
+        rule:
+          - 'len(body) == 0 && status="200"'
+      - path: /ejbserver/not-found-probe
+        rule:
+          - 'status="404"'
+```
+
+只有所有路径都满足条件时，才会输出该指纹结果；旧的 `path` 字段行为不变。
+
 ```yaml
 - name: 发现供应链
   description: 提取页面中的供应链标识

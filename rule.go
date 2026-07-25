@@ -12,16 +12,27 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+var bodyLengthRulePattern = regexp.MustCompile(`(?i)len\s*\(\s*body\s*\)\s*(==|!=|>=|<=|>|<)\s*(\d+)`)
+
 type Fingerprint struct {
-	Name           string               `yaml:"name"`
-	HighRisk       bool                 `yaml:"high_risk,omitempty"`
-	Vendor         string               `yaml:"vendor,omitempty"`
-	Description    string               `yaml:"description,omitempty"`
-	Path           []string             `yaml:"path,omitempty"`
-	ContextEnabled bool                 `yaml:"context_enable,omitempty"`
-	Rule           []string             `yaml:"rule"`
-	Vuln           bool                 `yaml:"vuln,omitempty"`
-	Extract        []FingerprintExtract `yaml:"extract,omitempty"`
+	Name           string                `yaml:"name"`
+	HighRisk       bool                  `yaml:"high_risk,omitempty"`
+	Vendor         string                `yaml:"vendor,omitempty"`
+	Description    string                `yaml:"description,omitempty"`
+	Path           []string              `yaml:"path,omitempty"`
+	PathRules      []FingerprintPathRule `yaml:"path_rules,omitempty"`
+	ContextEnabled bool                  `yaml:"context_enable,omitempty"`
+	Rule           []string              `yaml:"rule"`
+	Vuln           bool                  `yaml:"vuln,omitempty"`
+	Extract        []FingerprintExtract  `yaml:"extract,omitempty"`
+}
+
+// FingerprintPathRule describes one response predicate in a multi-path
+// fingerprint. All path_rules entries must match; rules within one entry
+// retain the existing rule-list semantics and match if any expression does.
+type FingerprintPathRule struct {
+	Path string   `yaml:"path"`
+	Rule []string `yaml:"rule"`
 }
 
 type FingerprintExtract struct {
@@ -41,6 +52,15 @@ type FingerEntity struct {
 	Rule           []RuleData
 	Vuln           bool
 	Extract        []FingerprintExtract
+	PathRules      []ActivePathRule
+}
+
+// ActivePathRule is the parsed form of one path_rules entry. It is kept off
+// the regular fingerprint database so path_rules are never evaluated against
+// the initial passive response or treated as independent legacy paths.
+type ActivePathRule struct {
+	Path         string
+	Fingerprints []FingerEntity
 }
 
 type RuleData struct {
@@ -57,6 +77,7 @@ type FingerprintRepository struct {
 	FingerprintDB              []FingerEntity
 	ActiveFingerprintDB        []FingerEntity
 	ContextActiveFingerprintDB []FingerEntity
+	MultiPathFingerprintDB     []FingerEntity
 }
 
 func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
@@ -71,6 +92,39 @@ func LoadFingerprintFromBytes(data []byte) ([]FingerEntity, error) {
 	for _, fingers := range fps {
 		// 遍历所有指纹
 		for _, finger := range fingers {
+			if len(finger.PathRules) > 0 {
+				entity := FingerEntity{
+					ProductName:    finger.Name,
+					Description:    finger.Description,
+					HighRisk:       finger.HighRisk,
+					ContextEnabled: finger.ContextEnabled,
+					Vuln:           finger.Vuln,
+					Extract:        append([]FingerprintExtract(nil), finger.Extract...),
+				}
+				for _, pathRule := range finger.PathRules {
+					pathRuleEntity := ActivePathRule{Path: pathRule.Path}
+					for _, rule := range pathRule.Rule {
+						pathRuleEntity.Fingerprints = append(pathRuleEntity.Fingerprints, FingerEntity{
+							ProductName:    finger.Name,
+							Rule:           ParseRule(rule),
+							Description:    finger.Description,
+							HighRisk:       finger.HighRisk,
+							AllString:      rule,
+							Path:           []string{pathRule.Path},
+							ContextEnabled: finger.ContextEnabled,
+							Vuln:           finger.Vuln,
+							Extract:        append([]FingerprintExtract(nil), finger.Extract...),
+						})
+					}
+					if strings.TrimSpace(pathRule.Path) != "" && len(pathRuleEntity.Fingerprints) > 0 {
+						entity.PathRules = append(entity.PathRules, pathRuleEntity)
+					}
+				}
+				if len(entity.PathRules) > 0 {
+					result = append(result, entity)
+				}
+			}
+
 			for _, rule := range finger.Rule {
 				entity := FingerEntity{
 					ProductName:    finger.Name,
@@ -108,8 +162,15 @@ func LoadFingerprintFromFS(fsys fs.FS, name string) ([]FingerEntity, error) {
 }
 
 func BuildFingerprintRepository(fingers []FingerEntity) *FingerprintRepository {
-	result := make([]FingerEntity, len(fingers))
-	copy(result, fingers)
+	result := make([]FingerEntity, 0, len(fingers))
+	var multiPath []FingerEntity
+	for _, entity := range fingers {
+		if len(entity.PathRules) > 0 {
+			multiPath = append(multiPath, entity)
+			continue
+		}
+		result = append(result, entity)
+	}
 
 	var active []FingerEntity
 	var contextActive []FingerEntity
@@ -126,6 +187,7 @@ func BuildFingerprintRepository(fingers []FingerEntity) *FingerprintRepository {
 		FingerprintDB:              result,
 		ActiveFingerprintDB:        active,
 		ContextActiveFingerprintDB: contextActive,
+		MultiPathFingerprintDB:     multiPath,
 	}
 }
 
@@ -147,6 +209,12 @@ func (r *FingerprintRepository) GetContextActiveFingerprintDB() []FingerEntity {
 	return result
 }
 
+func (r *FingerprintRepository) GetMultiPathFingerprintDB() []FingerEntity {
+	result := make([]FingerEntity, len(r.MultiPathFingerprintDB))
+	copy(result, r.MultiPathFingerprintDB)
+	return result
+}
+
 func ParseRule(rule string) []RuleData {
 	var result []RuleData
 	empty := RuleData{}
@@ -163,6 +231,15 @@ func ParseRule(rule string) []RuleData {
 }
 
 func getRuleData(rule string) RuleData {
+	// len(body) is a numeric pseudo-field. It is handled separately from the
+	// quoted string rules below because its value is intentionally unquoted,
+	// e.g. `len(body) == 0`.
+	bodyLengthData := getBodyLengthRuleData(rule)
+	quotedRuleStart := strings.Index(rule, "=\"")
+	if bodyLengthData != (RuleData{}) && (quotedRuleStart == -1 || bodyLengthData.Start < quotedRuleStart) {
+		return bodyLengthData
+	}
+
 	if !strings.Contains(rule, "=\"") {
 		return RuleData{}
 	}
@@ -211,6 +288,41 @@ func getRuleData(rule string) RuleData {
 	valueLc := strings.ToLower(value)
 	valueLc = strings.ReplaceAll(valueLc, "\\\"", "\"")
 	return RuleData{Start: start, End: end, Op: int16(op), Key: key, Value: value, ValueLC: valueLc, All: all}
+}
+
+func getBodyLengthRuleData(rule string) RuleData {
+	matches := bodyLengthRulePattern.FindStringSubmatchIndex(rule)
+	if len(matches) == 0 {
+		return RuleData{}
+	}
+
+	operator := rule[matches[2]:matches[3]]
+	op := int16(0)
+	switch operator {
+	case "!=":
+		op = 1
+	case "==":
+		op = 2
+	case ">=":
+		op = 3
+	case "<=":
+		op = 4
+	case ">", "<":
+		// The existing numeric matcher has no strict comparison operators.
+		// Keep the rule invalid rather than silently changing its meaning.
+		return RuleData{}
+	}
+
+	value := rule[matches[4]:matches[5]]
+	return RuleData{
+		Start:   matches[0],
+		End:     matches[1],
+		Op:      op,
+		Key:     "body_length",
+		Value:   value,
+		ValueLC: value,
+		All:     rule[matches[0]:matches[1]],
+	}
 }
 
 func isRuleKeyChar(char byte) bool {

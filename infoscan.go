@@ -476,6 +476,7 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 type ActiveFingerDetect struct {
 	URL               *url.URL
 	Fpe               []FingerEntity
+	MultiPath         *FingerEntity
 	Path              string
 	Detect            string
 	KnownFingerprints []string
@@ -578,6 +579,12 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		}
 		if fp.ShiroProbe {
 			if result, ok := s.probeShiroEndpoint(ctx, fp); ok {
+				retChan <- result
+			}
+			return
+		}
+		if fp.MultiPath != nil {
+			if result, ok := s.probeMultiPathFingerprint(ctx, fp, &timeoutCounter); ok {
 				retChan <- result
 			}
 			return
@@ -715,6 +722,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 	activePathMap := groupActiveFingerprintsByPath(s.getActiveFingerprintDB())
 	contextActivePathMap := groupActiveFingerprintsByPath(s.getContextActiveFingerprintDB())
+	multiPathFingerprints := s.getMultiPathFingerprintDB()
 	fullFingerprintDB := s.getFingerprintDB()
 	contextShiroProbeEnabled := hasShiroFingerprint(fullFingerprintDB)
 	for _, target := range s.aliveURLs {
@@ -733,6 +741,29 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		if activeTarget == nil {
 			continue
 		}
+
+		for _, fingerprint := range multiPathFingerprints {
+			if len(fingerprint.PathRules) == 0 {
+				continue
+			}
+			base := activeTarget.String()
+			if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
+				s.IncreaseActiveProgress(&id, count)
+				continue
+			}
+
+			multiPath := fingerprint
+			wg.Add(1)
+			s.IncreaseActiveProgress(&id, count)
+			if err := threadPool.Invoke(ActiveFingerDetect{
+				URL:       activeTarget,
+				MultiPath: &multiPath,
+				Detect:    "Active",
+			}); err != nil {
+				wg.Done()
+			}
+		}
+
 		activeProbeURLs := make(map[string]struct{}, len(activePathMap))
 		for path := range activePathMap {
 			activeProbeURLs[buildActiveProbeURL(activeTarget, path)] = struct{}{}
@@ -879,6 +910,118 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	<-single
 }
 
+func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task ActiveFingerDetect, timeoutCounter *sync.Map) (Result, bool) {
+	if task.URL == nil || task.MultiPath == nil || len(task.MultiPath.PathRules) == 0 {
+		return Result{}, false
+	}
+
+	baseURL := task.URL.String()
+	if val, ok := timeoutCounter.Load(baseURL); ok && val.(int) >= s.activeTimeoutLimit {
+		return Result{}, false
+	}
+
+	matched := make(map[string]FingerprintMatch)
+	var firstWeb *WebInfo
+	var firstURL string
+	var firstTitle string
+	var firstServer string
+	var firstContentType string
+	var rawResponses []string
+
+	for _, pathRule := range task.MultiPath.PathRules {
+		if ctx.Err() != nil {
+			return Result{}, false
+		}
+
+		fullURL := buildActiveProbeURL(task.URL, pathRule.Path)
+		resp, err := clients.DoRequest("GET", fullURL, s.headers, nil, 5, s.client)
+		if err != nil {
+			v, _ := timeoutCounter.LoadOrStore(baseURL, 1)
+			timeoutCounter.Store(baseURL, v.(int)+1)
+			return Result{}, false
+		}
+
+		body := resp.Body()
+		server := resp.Header().Get("Server")
+		contentType := resp.Header().Get("Content-Type")
+		title := clients.GetTitle(body)
+		headers, _, _ := httputil.DumpResponseHeadersAndRaw(resp.RawResponse)
+		responsePath := pathRule.Path
+		if parsedURL, parseErr := url.Parse(fullURL); parseErr == nil {
+			responsePath = parsedURL.Path
+		}
+
+		web := &WebInfo{
+			Protocol:      strings.ToLower(task.URL.Scheme),
+			HeadeString:   strings.ToLower(string(headers)),
+			ContentType:   strings.ToLower(contentType),
+			Cert:          strings.ToLower(GetTLSString(task.URL.Scheme, task.URL.Host)),
+			BodyString:    strings.ToLower(string(body)),
+			Path:          strings.ToLower(responsePath),
+			Title:         strings.ToLower(title),
+			Server:        strings.ToLower(server),
+			ContentLength: len(body),
+			Port:          httputil.GetPort(task.URL),
+			StatusCode:    resp.StatusCode(),
+		}
+
+		pathMatches := Scan(web, pathRule.Fingerprints)
+		if len(pathMatches) == 0 {
+			return Result{}, false
+		}
+		mergeFingerprintMatches(matched, pathMatches)
+
+		if firstWeb == nil {
+			firstWeb = web
+			firstURL = fullURL
+			firstTitle = title
+			firstServer = server
+			firstContentType = contentType
+		}
+		if s.enableRawResponse {
+			rawResponses = append(rawResponses, dumpRawResponsePacket(resp))
+		}
+	}
+
+	if firstWeb == nil || ctx.Err() != nil {
+		return Result{}, false
+	}
+
+	var screenshotPath string
+	if s.screenshot && (task.URL.Scheme == "https" || task.URL.Scheme == "http") {
+		var err error
+		screenshotPath, err = s.captureScreenshot(ctx, firstURL)
+		if err != nil && s.shouldReportScreenshotDiagnostics() {
+			logger.Default.Warning("%s 截屏失败: %v", firstURL, err)
+		}
+	}
+
+	fingerprints := fingerprintMatchesFromMap(matched)
+	s.mutex.Lock()
+	if s.basicURLWithFingerprint == nil {
+		s.basicURLWithFingerprint = make(map[string][]string)
+	}
+	s.basicURLWithFingerprint[baseURL] = append(s.basicURLWithFingerprint[baseURL], matchedFingerprintNames(fingerprints)...)
+	s.mutex.Unlock()
+
+	return Result{
+		URL:          firstURL,
+		Scheme:       task.URL.Scheme,
+		Host:         task.URL.Host,
+		Port:         firstWeb.Port,
+		StatusCode:   firstWeb.StatusCode,
+		Length:       firstWeb.ContentLength,
+		Title:        firstTitle,
+		Server:       firstServer,
+		ContentType:  firstContentType,
+		Path:         firstWeb.Path,
+		Fingerprints: fingerprints,
+		Detect:       "Active",
+		Screenshot:   screenshotPath,
+		RawResponse:  strings.Join(rawResponses, "\n\n--- path_rules response ---\n\n"),
+	}, true
+}
+
 func buildActiveProbeURL(base *url.URL, probePath string) string {
 	if base == nil {
 		return probePath
@@ -921,6 +1064,13 @@ func (s *FingerScanner) getContextActiveFingerprintDB() []FingerEntity {
 		return nil
 	}
 	return s.fingerprintRepo.GetContextActiveFingerprintDB()
+}
+
+func (s *FingerScanner) getMultiPathFingerprintDB() []FingerEntity {
+	if s == nil || s.fingerprintRepo == nil {
+		return nil
+	}
+	return s.fingerprintRepo.GetMultiPathFingerprintDB()
 }
 
 func (s *FingerScanner) knownFingerprintsForActiveTarget(target *url.URL, activeTarget *url.URL) []string {
@@ -977,6 +1127,7 @@ func (s *FingerScanner) ActiveCounts() int {
 	}
 
 	activePathCount := len(groupActiveFingerprintsByPath(s.getActiveFingerprintDB()))
+	multiPathCount := len(s.getMultiPathFingerprintDB())
 	contextShiroProbeEnabled := hasShiroFingerprint(s.getFingerprintDB())
 	adminPathCount := 0
 	if len(s.getFingerprintDB()) > 0 {
@@ -988,7 +1139,7 @@ func (s *FingerScanner) ActiveCounts() int {
 		if target == nil {
 			continue
 		}
-		total += activePathCount + adminPathCount
+		total += activePathCount + multiPathCount + adminPathCount
 		activeTarget := target
 		if s.rootPath {
 			activeTarget, _ = url.Parse(httputil.GetBasicURL(target.String()))
@@ -1147,6 +1298,45 @@ func matchedFingerprintNames(fingerprints []FingerprintMatch) []string {
 	return arrayutil.RemoveDuplicates(names)
 }
 
+func mergeFingerprintMatches(target map[string]FingerprintMatch, matches []FingerprintMatch) {
+	for _, match := range matches {
+		existing, ok := target[match.Name]
+		if !ok {
+			target[match.Name] = match
+			continue
+		}
+		existing.HighRisk = existing.HighRisk || match.HighRisk
+		existing.Vuln = existing.Vuln || match.Vuln
+		if strings.TrimSpace(existing.Description) == "" {
+			existing.Description = match.Description
+		}
+		if existing.MatchedRule == "" {
+			existing.MatchedRule = match.MatchedRule
+		}
+		for _, extraction := range match.Extractions {
+			seen := false
+			for _, previous := range existing.Extractions {
+				if previous.Name == extraction.Name && previous.Source == extraction.Source && previous.Value == extraction.Value {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				existing.Extractions = append(existing.Extractions, extraction)
+			}
+		}
+		target[match.Name] = existing
+	}
+}
+
+func fingerprintMatchesFromMap(matches map[string]FingerprintMatch) []FingerprintMatch {
+	result := make([]FingerprintMatch, 0, len(matches))
+	for _, match := range matches {
+		result = append(result, match)
+	}
+	return result
+}
+
 // Scan 扫描指纹，返回结构化指纹结果。
 func Scan(web *WebInfo, targetDB []FingerEntity) []FingerprintMatch {
 	fingerprintMap := make(map[string]*FingerprintMatch)
@@ -1187,6 +1377,11 @@ func Scan(web *WebInfo, targetDB []FingerEntity) []FingerprintMatch {
 				value, err := strconv.Atoi(rule.Value)
 				if err == nil {
 					result = dataCheckInt(rule.Op, web.StatusCode, value)
+				}
+			case "body_length":
+				value, err := strconv.Atoi(rule.Value)
+				if err == nil {
+					result = dataCheckInt(rule.Op, web.ContentLength, value)
 				}
 			case "content_type":
 				result = dataCheckString(rule.Op, web.ContentType, rule.ValueLC)
