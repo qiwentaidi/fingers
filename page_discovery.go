@@ -15,8 +15,7 @@ import (
 )
 
 const (
-	maxDiscoveredPagesPerTarget      = 12
-	maxAutomaticShiroEndpointsTarget = 4
+	maxDiscoveredPagesPerTarget = 12
 )
 
 const (
@@ -25,7 +24,6 @@ const (
 	apiResponseDetect        = "APIResponse"
 	apiResponseContextDetect = "APIResponseContext"
 	jsRouteDetect            = "JSRoute"
-	automaticAPIShiroDetect  = "AutomaticAPIShiro"
 )
 
 var (
@@ -83,7 +81,6 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 				continue
 			}
 			dynamicPaths = append(dynamicPaths, requestURL.Path)
-			s.storeAutomaticShiroEndpoint(target, requestURL)
 		}
 		s.storeJSContextPaths(target, deriveAPIContextPaths(dynamicPaths))
 		for _, raw := range capture.DOMURLs {
@@ -104,71 +101,6 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// storeAutomaticShiroEndpoint retains only a small set of authentication
-// endpoints that the browser actually requested during initial page load.
-// These entries are used solely by the rememberMe Shiro probe: they are never
-// promoted to page candidates, active fingerprint paths, or recursive targets.
-func (s *FingerScanner) storeAutomaticShiroEndpoint(target, candidate *url.URL) {
-	if s == nil || target == nil || candidate == nil || !sameOriginURL(target, candidate) || !isAutomaticShiroEndpointPath(candidate.Path) {
-		return
-	}
-
-	endpoint := *candidate
-	endpoint.RawQuery = ""
-	endpoint.ForceQuery = false
-	endpoint.Fragment = ""
-	endpoint.RawFragment = ""
-	endpoint.RawPath = ""
-	key := contextOriginKey(target)
-
-	s.pageDiscoveryMutex.Lock()
-	defer s.pageDiscoveryMutex.Unlock()
-	if s.automaticShiroEndpoints == nil {
-		s.automaticShiroEndpoints = make(map[string]map[string]*url.URL)
-	}
-	if s.automaticShiroEndpoints[key] == nil {
-		s.automaticShiroEndpoints[key] = make(map[string]*url.URL)
-	}
-	if len(s.automaticShiroEndpoints[key]) >= maxAutomaticShiroEndpointsTarget {
-		return
-	}
-	if _, exists := s.automaticShiroEndpoints[key][endpoint.String()]; !exists {
-		s.automaticShiroEndpoints[key][endpoint.String()] = &endpoint
-	}
-}
-
-func isAutomaticShiroEndpointPath(candidatePath string) bool {
-	segments := splitContextPath(candidatePath)
-	if len(segments) < 2 {
-		return false
-	}
-	for _, segment := range segments {
-		switch strings.ToLower(segment) {
-		case "security", "shiro":
-			return true
-		}
-	}
-	return false
-}
-
-func (s *FingerScanner) automaticShiroEndpointsForTarget(target *url.URL) []*url.URL {
-	if s == nil || target == nil {
-		return nil
-	}
-	s.pageDiscoveryMutex.Lock()
-	endpoints := make([]*url.URL, 0, len(s.automaticShiroEndpoints[contextOriginKey(target)]))
-	for _, endpoint := range s.automaticShiroEndpoints[contextOriginKey(target)] {
-		if endpoint == nil {
-			continue
-		}
-		copyEndpoint := *endpoint
-		endpoints = append(endpoints, &copyEndpoint)
-	}
-	s.pageDiscoveryMutex.Unlock()
-	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].String() < endpoints[j].String() })
-	return endpoints
 }
 
 func extractHTMLPageReferences(body []byte) []string {

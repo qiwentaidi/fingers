@@ -71,7 +71,6 @@ type FingerScanner struct {
 	pageContextBodies        map[string][]byte
 	pageDiscoveryMutex       sync.Mutex
 	discoveredPageCandidates map[string]map[string]pageCandidate
-	automaticShiroEndpoints  map[string]map[string]*url.URL
 }
 
 func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore assetStore, screenshotStore assetStore) *FingerScanner {
@@ -327,11 +326,12 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 		// 请求Logo并保存到本地
 		faviconResult := getFaviconWithStorage(finalURL, s.headers, s.client, s.faviconStore)
 
-		// Send Shiro's rememberMe probe and retain every Set-Cookie response
-		// header. A Shiro server commonly places rememberMe=deleteMe after
-		// unrelated cookies, so Header.Get("Set-Cookie") would discard the
-		// identifying value.
-		rawHeaders = append(rawHeaders, s.ShiroScan(finalURL)...)
+		// Shiro detection is limited to the origin root. A Shiro server commonly
+		// places rememberMe=deleteMe after unrelated cookies, so Header.Get("Set-Cookie")
+		// would discard the identifying value.
+		if rootURL, parseErr := url.Parse(httputil.GetBasicURL(finalURL.String())); parseErr == nil {
+			rawHeaders = append(rawHeaders, s.ShiroScan(rootURL)...)
+		}
 
 		// 跟随JS重定向，并替换成重定向后的数据
 		redirectBody := s.GetJSRedirectResponse(finalURL, string(body))
@@ -480,7 +480,6 @@ type ActiveFingerDetect struct {
 	Path              string
 	Detect            string
 	KnownFingerprints []string
-	ShiroProbe        bool
 }
 
 // 让每一个路径都只绑定一个实体
@@ -575,12 +574,6 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 		fp := tfp.(ActiveFingerDetect)
 		if fp.URL == nil {
-			return
-		}
-		if fp.ShiroProbe {
-			if result, ok := s.probeShiroEndpoint(ctx, fp); ok {
-				retChan <- result
-			}
 			return
 		}
 		if fp.MultiPath != nil {
@@ -724,7 +717,6 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	contextActivePathMap := groupActiveFingerprintsByPath(s.getContextActiveFingerprintDB())
 	multiPathFingerprints := s.getMultiPathFingerprintDB()
 	fullFingerprintDB := s.getFingerprintDB()
-	contextShiroProbeEnabled := hasShiroFingerprint(fullFingerprintDB)
 	for _, target := range s.aliveURLs {
 		// 在外层循环检查 context
 		if ctx.Err() != nil {
@@ -769,7 +761,6 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			activeProbeURLs[buildActiveProbeURL(activeTarget, path)] = struct{}{}
 		}
 		contextProbeURLs := make(map[string]struct{})
-		contextShiroProbeURLs := make(map[string]struct{})
 
 		for path, fingers := range activePathMap {
 			// 在内层循环也检查 context
@@ -801,22 +792,6 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			if contextTarget == nil || sameURLPath(activeTarget.Path, contextTarget.Path) {
 				continue
 			}
-			if contextShiroProbeEnabled {
-				probeURL := contextTarget.String()
-				if _, exists := contextShiroProbeURLs[probeURL]; !exists {
-					contextShiroProbeURLs[probeURL] = struct{}{}
-					wg.Add(1)
-					s.IncreaseActiveProgress(&id, count)
-					if err := threadPool.Invoke(ActiveFingerDetect{
-						URL:        contextTarget,
-						Fpe:        fullFingerprintDB,
-						Detect:     contextShiroDetectName,
-						ShiroProbe: true,
-					}); err != nil {
-						wg.Done()
-					}
-				}
-			}
 			for path, fingers := range contextActivePathMap {
 				if ctx.Err() != nil {
 					break
@@ -843,32 +818,6 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 					Fpe:    fingers,
 					Path:   path,
 					Detect: contextActiveDetectName,
-				}); err != nil {
-					wg.Done()
-				}
-			}
-		}
-
-		// Probe only concrete, same-origin authentication endpoints that were
-		// observed during the initial browser page load. They intentionally do
-		// not participate in ordinary active-path scanning or page discovery.
-		if contextShiroProbeEnabled {
-			for _, endpoint := range s.automaticShiroEndpointsForTarget(target) {
-				if endpoint == nil {
-					continue
-				}
-				probeURL := endpoint.String()
-				if _, exists := contextShiroProbeURLs[probeURL]; exists {
-					continue
-				}
-				contextShiroProbeURLs[probeURL] = struct{}{}
-				wg.Add(1)
-				s.IncreaseActiveProgress(&id, count)
-				if err := threadPool.Invoke(ActiveFingerDetect{
-					URL:        endpoint,
-					Fpe:        fullFingerprintDB,
-					Detect:     automaticAPIShiroDetect,
-					ShiroProbe: true,
 				}); err != nil {
 					wg.Done()
 				}
@@ -1128,7 +1077,6 @@ func (s *FingerScanner) ActiveCounts() int {
 
 	activePathCount := len(groupActiveFingerprintsByPath(s.getActiveFingerprintDB()))
 	multiPathCount := len(s.getMultiPathFingerprintDB())
-	contextShiroProbeEnabled := hasShiroFingerprint(s.getFingerprintDB())
 	adminPathCount := 0
 	if len(s.getFingerprintDB()) > 0 {
 		adminPathCount = len(basicAdminBackendPaths)
@@ -1152,18 +1100,10 @@ func (s *FingerScanner) ActiveCounts() int {
 			activeProbeURLs[buildActiveProbeURL(activeTarget, path)] = struct{}{}
 		}
 		contextProbeURLs := make(map[string]struct{})
-		contextShiroProbeURLs := make(map[string]struct{})
 		for _, contextPath := range s.contextPathsForTarget(target) {
 			contextTarget := buildContextBaseURL(target, contextPath)
 			if contextTarget == nil || sameURLPath(activeTarget.Path, contextTarget.Path) {
 				continue
-			}
-			if contextShiroProbeEnabled {
-				probeURL := contextTarget.String()
-				if _, exists := contextShiroProbeURLs[probeURL]; !exists {
-					contextShiroProbeURLs[probeURL] = struct{}{}
-					total++
-				}
 			}
 			for path := range groupActiveFingerprintsByPath(s.getContextActiveFingerprintDB()) {
 				probeURL := buildActiveProbeURL(contextTarget, path)
@@ -1175,18 +1115,6 @@ func (s *FingerScanner) ActiveCounts() int {
 				}
 				contextProbeURLs[probeURL] = struct{}{}
 				total++
-			}
-		}
-		if contextShiroProbeEnabled {
-			seenAutomaticEndpoints := make(map[string]struct{})
-			for _, endpoint := range s.automaticShiroEndpointsForTarget(target) {
-				if endpoint == nil {
-					continue
-				}
-				if _, exists := seenAutomaticEndpoints[endpoint.String()]; !exists {
-					seenAutomaticEndpoints[endpoint.String()] = struct{}{}
-					total++
-				}
 			}
 		}
 	}
@@ -1498,86 +1426,6 @@ func (s *FingerScanner) ShiroScan(u *url.URL) []byte {
 		rawHeaders = append(rawHeaders, '\n')
 	}
 	return rawHeaders
-}
-
-func hasShiroFingerprint(fingers []FingerEntity) bool {
-	for _, finger := range fingers {
-		name := strings.ToLower(strings.TrimSpace(finger.ProductName))
-		if name == "shiro" || name == "apache shiro" {
-			return true
-		}
-	}
-	return false
-}
-
-func filterShiroFingerprints(fingerprints []FingerprintMatch) []FingerprintMatch {
-	filtered := make([]FingerprintMatch, 0, len(fingerprints))
-	for _, fingerprint := range fingerprints {
-		name := strings.ToLower(strings.TrimSpace(fingerprint.Name))
-		if name == "shiro" || name == "apache shiro" {
-			filtered = append(filtered, fingerprint)
-		}
-	}
-	return filtered
-}
-
-// probeShiroEndpoint runs the rememberMe probe on a discovered context root or
-// a concrete endpoint that was automatically requested by the initial page.
-func (s *FingerScanner) probeShiroEndpoint(ctx context.Context, fp ActiveFingerDetect) (Result, bool) {
-	if ctx.Err() != nil || fp.URL == nil {
-		return Result{}, false
-	}
-
-	resp, err := s.shiroProbeRequest(fp.URL)
-	if err != nil || resp == nil || ctx.Err() != nil {
-		return Result{}, false
-	}
-
-	headers, _, _ := httputil.DumpResponseHeadersAndRaw(resp.RawResponse)
-	body := resp.Body()
-	web := &WebInfo{
-		HeadeString:   strings.ToLower(string(headers)),
-		ContentType:   strings.ToLower(resp.Header().Get("Content-Type")),
-		BodyString:    strings.ToLower(string(body)),
-		Path:          strings.ToLower(fp.URL.Path),
-		Title:         strings.ToLower(clients.GetTitle(body)),
-		Server:        strings.ToLower(resp.Header().Get("Server")),
-		ContentLength: len(body),
-		Port:          httputil.GetPort(fp.URL),
-		StatusCode:    resp.StatusCode(),
-	}
-	fingerprints := filterShiroFingerprints(Scan(web, fp.Fpe))
-	if len(fingerprints) == 0 {
-		return Result{}, false
-	}
-
-	rawResponse := ""
-	if s.enableRawResponse {
-		rawResponse = dumpRawResponsePacket(resp)
-	}
-	result := Result{
-		URL:          fp.URL.String(),
-		StatusCode:   web.StatusCode,
-		Length:       web.ContentLength,
-		Title:        clients.GetTitle(body),
-		Server:       resp.Header().Get("Server"),
-		ContentType:  resp.Header().Get("Content-Type"),
-		Path:         fp.URL.Path,
-		Fingerprints: fingerprints,
-		Detect:       fp.Detect,
-		Port:         web.Port,
-		Scheme:       fp.URL.Scheme,
-		Host:         fp.URL.Host,
-		RawResponse:  rawResponse,
-	}
-
-	s.mutex.Lock()
-	if s.basicURLWithFingerprint == nil {
-		s.basicURLWithFingerprint = make(map[string][]string)
-	}
-	s.basicURLWithFingerprint[fp.URL.String()] = append(s.basicURLWithFingerprint[fp.URL.String()], matchedFingerprintNames(fingerprints)...)
-	s.mutex.Unlock()
-	return result, true
 }
 
 // 探测Fastjson

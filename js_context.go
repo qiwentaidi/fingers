@@ -17,7 +17,6 @@ import (
 
 const (
 	contextActiveDetectName   = "ActiveContext"
-	contextShiroDetectName    = "ActiveContextShiro"
 	maxJSContextResourceBytes = 2 * 1024 * 1024
 	maxJSContextPaths         = 4
 )
