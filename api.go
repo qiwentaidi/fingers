@@ -89,6 +89,7 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	s.FingerScan(ctx, callback)
 	if s.deepScan {
 		s.discoverDynamicContextPaths(ctx)
+		s.scanDiscoveredRequestFingerprints(ctx, callback)
 		s.scanDiscoveredPages(ctx, callback)
 		s.HostTokenPathProbe(ctx, callback)
 		s.ActiveFingerScan(ctx, callback)

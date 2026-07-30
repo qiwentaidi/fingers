@@ -74,6 +74,7 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 		if err != nil && s.shouldPrintDefaultOutput() {
 			logger.Default.Debug("[headless] capture page candidates for %s partially failed: %v", target, err)
 		}
+		s.storeDiscoveredRequests(target, capture.APIRequests)
 		dynamicPaths := make([]string, 0, len(capture.RequestURLs))
 		for _, raw := range capture.RequestURLs {
 			requestURL, parseErr := url.Parse(raw)

@@ -69,6 +69,8 @@ type FingerScanner struct {
 	jsContextPaths           map[string][]string
 	jsContextCache           map[string]*jsContextCacheEntry
 	pageContextBodies        map[string][]byte
+	discoveredRequestMutex   sync.Mutex
+	discoveredRequests       map[string][]DiscoveredRequest
 	pageDiscoveryMutex       sync.Mutex
 	discoveredPageCandidates map[string]map[string]pageCandidate
 }
@@ -121,6 +123,7 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		jsContextPaths:           make(map[string][]string),
 		jsContextCache:           make(map[string]*jsContextCacheEntry),
 		pageContextBodies:        make(map[string][]byte),
+		discoveredRequests:       make(map[string][]DiscoveredRequest),
 		discoveredPageCandidates: make(map[string]map[string]pageCandidate),
 		headers:                  parseHeadersToMap(options.CustomHeaders, options.Headers),
 	}

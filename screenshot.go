@@ -31,8 +31,10 @@ const (
 	screenshotSoftTimeout      = 8 * time.Second
 	screenshotFallbackHTMLSize = 2 * 1024 * 1024
 	dynamicCaptureInitialWait  = 4 * time.Second
+	dynamicCaptureInteractWait = 2 * time.Second
 	dynamicCaptureTimeout      = 20 * time.Second
 	maxCapturedAPIResponses    = 12
+	maxCapturedRequestBodySize = 16 * 1024
 	maxCapturedAPIResponseSize = 512 * 1024
 )
 
@@ -47,6 +49,7 @@ type pageLoadCapture struct {
 	RequestURLs  []string
 	DOMURLs      []string
 	APIResponses []capturedAPIResponse
+	APIRequests  []DiscoveredRequest
 }
 
 type screenshotBrowser struct {
@@ -140,6 +143,7 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 
 	seen := make(map[string]struct{})
 	responseRequests := make(map[network.RequestID]string)
+	apiRequests := make(map[network.RequestID]*DiscoveredRequest)
 	finishedResponses := make(map[network.RequestID]struct{})
 	var mu sync.Mutex
 	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
@@ -153,6 +157,13 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 				seen[event.Request.URL] = struct{}{}
 				result.RequestURLs = append(result.RequestURLs, event.Request.URL)
 			}
+			apiRequests[event.RequestID] = &DiscoveredRequest{
+				URL:         event.Request.URL,
+				Method:      event.Request.Method,
+				Headers:     stringifyNetworkHeaders(event.Request.Headers),
+				ContentType: requestHeaderValue(event.Request.Headers, "Content-Type"),
+				Source:      "dynamic-browser-capture",
+			}
 			mu.Unlock()
 		case *network.EventResponseReceived:
 			if event == nil || event.Response == nil || !isHTTPURL(event.Response.URL) || !isLikelyAPIResponse(event.Response.URL, event.Response.MimeType) {
@@ -165,6 +176,12 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 			mu.Lock()
 			if len(responseRequests) < maxCapturedAPIResponses {
 				responseRequests[event.RequestID] = event.Response.URL
+			}
+			if request := apiRequests[event.RequestID]; request != nil {
+				request.URL = event.Response.URL
+				request.ResponseHeaders = stringifyNetworkHeaders(event.Response.Headers)
+				request.ResponseCode = int(event.Response.Status)
+				request.ResponseMIMEType = event.Response.MimeType
 			}
 			mu.Unlock()
 		case *network.EventLoadingFinished:
@@ -184,6 +201,8 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 		network.Enable(),
 		chromedp.Navigate(targetURL),
 		chromedp.Sleep(dynamicCaptureInitialWait),
+		chromedp.Evaluate(autoTriggerFormsScript, nil),
+		chromedp.Sleep(dynamicCaptureInteractWait),
 		chromedp.Evaluate(`(() => {
 			const values = [];
 			document.querySelectorAll('a[href],area[href],iframe[src],frame[src],link[rel="canonical"][href]').forEach((node) => {
@@ -204,6 +223,12 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 	mu.Unlock()
 	for _, requestID := range requestIDs {
 		var body []byte
+		var requestBody string
+		_ = chromedp.Run(captureCtx, chromedp.ActionFunc(func(actionCtx context.Context) error {
+			var err error
+			requestBody, err = network.GetRequestPostData(requestID).Do(actionCtx)
+			return err
+		}))
 		bodyErr := chromedp.Run(captureCtx, chromedp.ActionFunc(func(actionCtx context.Context) error {
 			var err error
 			body, err = network.GetResponseBody(requestID).Do(actionCtx)
@@ -214,12 +239,140 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 		}
 		mu.Lock()
 		responseURL := responseRequests[requestID]
+		request := apiRequests[requestID]
 		mu.Unlock()
 		result.APIResponses = append(result.APIResponses, capturedAPIResponse{URL: responseURL, Body: body})
+		if request != nil {
+			if requestBody != "" {
+				request.Body = limitCapturedText(requestBody, maxCapturedRequestBodySize)
+			}
+			request.ResponseBody = limitCapturedText(string(body), maxCapturedAPIResponseSize)
+			result.APIRequests = append(result.APIRequests, *request)
+		}
 	}
 	result.DOMURLs = domURLs
 	return result, err
 }
+
+func stringifyNetworkHeaders(headers network.Headers) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(headers))
+	for key, value := range headers {
+		result[key] = fmt.Sprint(value)
+	}
+	return result
+}
+
+func requestHeaderValue(headers network.Headers, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return strings.TrimSpace(fmt.Sprint(value))
+		}
+	}
+	return ""
+}
+
+func limitCapturedText(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit]
+}
+
+const autoTriggerFormsScript = `(function () {
+  function isVisible(el) {
+    if (!el) return false;
+    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    return !!(rect && rect.width > 0 && rect.height > 0);
+  }
+  function emit(el) {
+    ["input", "change", "blur"].forEach(function (name) {
+      try { el.dispatchEvent(new Event(name, { bubbles: true })); } catch (err) {}
+    });
+  }
+  function labelOf(el) {
+    return String(el.name || el.id || el.placeholder || el.type || "").toLowerCase();
+  }
+  function valueFor(el, index) {
+    var label = labelOf(el);
+    var type = String(el.type || "").toLowerCase();
+    if (type === "password" || label.indexOf("pass") >= 0 || label.indexOf("pwd") >= 0 || label.indexOf("密码") >= 0) return "labpass";
+    if (type === "email" || label.indexOf("mail") >= 0 || label.indexOf("邮箱") >= 0) return "finger+" + index + "@example.com";
+    if (type === "tel" || label.indexOf("phone") >= 0 || label.indexOf("mobile") >= 0 || label.indexOf("手机") >= 0) return "13800138000";
+    if (type === "number") return String(1000 + index);
+    if (label.indexOf("user") >= 0 || label.indexOf("account") >= 0 || label.indexOf("login") >= 0 || label.indexOf("用户名") >= 0 || label.indexOf("账号") >= 0) return "labuser";
+    return "finger_probe_" + index;
+  }
+  function fields(root) {
+    return Array.prototype.slice.call(root.querySelectorAll("input, textarea, select")).filter(function (el) {
+      if (el.disabled || el.readOnly) return false;
+      var type = String(el.type || "").toLowerCase();
+      if (["hidden", "submit", "button", "reset", "file", "image"].indexOf(type) >= 0) return false;
+      return isVisible(el) || !!el.closest(".login,.login-form,.ant-form,.el-form,[role='form']");
+    });
+  }
+  function fill(items) {
+    items.forEach(function (el, index) {
+      var tag = String(el.tagName || "").toLowerCase();
+      var type = String(el.type || "").toLowerCase();
+      if (tag === "select") {
+        var option = Array.prototype.slice.call(el.options || []).find(function (item) {
+          return !item.disabled && String(item.value || "").trim() !== "";
+        });
+        if (option && String(el.value || "").trim() === "") el.value = option.value;
+        emit(el);
+        return;
+      }
+      if (type === "checkbox" || type === "radio") {
+        el.checked = true;
+        emit(el);
+        return;
+      }
+      if (String(el.value || "").trim() === "") el.value = valueFor(el, index + 1);
+      emit(el);
+    });
+  }
+  function submitControl(root) {
+    var buttons = Array.prototype.slice.call(root.querySelectorAll("button, input[type='submit'], input[type='button'], [role='button']")).filter(function (el) {
+      return !el.disabled && isVisible(el);
+    });
+    return buttons.find(function (el) {
+      var text = String(el.innerText || el.textContent || el.value || "").toLowerCase();
+      var type = String(el.type || "").toLowerCase();
+      return type === "submit" || /(login|signin|sign in|submit|confirm|continue|next|登录|提交|确定|继续)/i.test(text);
+    }) || buttons[0] || null;
+  }
+  var roots = Array.prototype.slice.call(document.querySelectorAll("form,.login-form,.login,.ant-form,.el-form,[role='form']")).filter(function (root) {
+    return isVisible(root) || fields(root).length > 0;
+  });
+  if (!roots.length) roots = [document.body];
+  for (var i = 0; i < roots.length; i++) {
+    var root = roots[i];
+    if (root.__fingersAutoTriggered) continue;
+    var items = fields(root);
+    if (!items.length) continue;
+    fill(items);
+    root.__fingersAutoTriggered = true;
+    var button = submitControl(root);
+    if (button && typeof button.click === "function") {
+      button.click();
+      return { triggered: true, reason: "clicked_submit_control" };
+    }
+    if (root.tagName && String(root.tagName).toLowerCase() === "form" && typeof root.requestSubmit === "function") {
+      root.requestSubmit();
+      return { triggered: true, reason: "request_submit" };
+    }
+    if (root.tagName && String(root.tagName).toLowerCase() === "form" && typeof root.submit === "function") {
+      root.submit();
+      return { triggered: true, reason: "submit" };
+    }
+  }
+  return { triggered: false, reason: "no_form_triggered" };
+})()`
 
 func isJSONMIMEType(mimeType string) bool {
 	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
@@ -227,15 +380,37 @@ func isJSONMIMEType(mimeType string) bool {
 }
 
 func isLikelyAPIResponse(rawURL string, mimeType string) bool {
-	if isJSONMIMEType(mimeType) {
-		return true
-	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	path := strings.ToLower(parsed.Path)
+	if isStaticAssetPath(path) {
+		return false
+	}
+	if isJSONMIMEType(mimeType) {
+		return true
+	}
 	return strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/rest/") || strings.HasPrefix(path, "/service/")
+}
+
+func isStaticAssetPath(path string) bool {
+	path = strings.ToLower(strings.TrimSpace(path))
+	if path == "" {
+		return false
+	}
+	staticSuffixes := []string{
+		".css", ".js", ".mjs", ".map",
+		".ico", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif",
+		".woff", ".woff2", ".ttf", ".otf", ".eot",
+		".mp3", ".mp4", ".webm", ".wav", ".pdf", ".zip", ".rar", ".7z",
+	}
+	for _, suffix := range staticSuffixes {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isHTTPURL(raw string) bool {

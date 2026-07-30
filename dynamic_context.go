@@ -35,6 +35,53 @@ func (s *FingerScanner) pageContextBody(pageURL *url.URL) []byte {
 	return append([]byte(nil), s.pageContextBodies[contextOriginKey(pageURL)]...)
 }
 
+func (s *FingerScanner) storeDiscoveredRequests(pageURL *url.URL, requests []DiscoveredRequest) {
+	if s == nil || pageURL == nil || len(requests) == 0 {
+		return
+	}
+	key := contextOriginKey(pageURL)
+	s.discoveredRequestMutex.Lock()
+	defer s.discoveredRequestMutex.Unlock()
+	if s.discoveredRequests == nil {
+		s.discoveredRequests = make(map[string][]DiscoveredRequest)
+	}
+	s.discoveredRequests[key] = append(s.discoveredRequests[key], cloneDiscoveredRequests(requests)...)
+}
+
+func (s *FingerScanner) discoveredRequestsForTarget(pageURL *url.URL) []DiscoveredRequest {
+	if s == nil || pageURL == nil {
+		return nil
+	}
+	s.discoveredRequestMutex.Lock()
+	defer s.discoveredRequestMutex.Unlock()
+	return cloneDiscoveredRequests(s.discoveredRequests[contextOriginKey(pageURL)])
+}
+
+func cloneDiscoveredRequests(requests []DiscoveredRequest) []DiscoveredRequest {
+	if len(requests) == 0 {
+		return nil
+	}
+	result := make([]DiscoveredRequest, 0, len(requests))
+	for _, request := range requests {
+		next := request
+		next.Headers = cloneStringMap(request.Headers)
+		next.ResponseHeaders = cloneStringMap(request.ResponseHeaders)
+		result = append(result, next)
+	}
+	return result
+}
+
+func cloneStringMap(items map[string]string) map[string]string {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(items))
+	for key, value := range items {
+		result[key] = value
+	}
+	return result
+}
+
 // discoverDynamicContextPaths keeps its historical name because it is the
 // dynamic-discovery entry point. It now also records first-level page
 // candidates, while preserving the original no-click/no-form-submit policy.
