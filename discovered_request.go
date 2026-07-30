@@ -262,7 +262,7 @@ func scanShiroDiscoveredEndpoints(targetURL string, requests []DiscoveredRequest
 		result.Length = len(body)
 		result.Title = clients.GetTitle(body)
 		result.Detect = "DiscoveredRequestShiro"
-		result.Fingerprints = []FingerprintMatch{{Name: "Shiro"}}
+		result.Fingerprints = []FingerprintMatch{{Name: "Shiro", HighRisk: true}}
 		findings = append(findings, result)
 	}
 	return findings
@@ -308,7 +308,7 @@ func scanFastjsonDiscoveredEndpoints(requests []DiscoveredRequest) []Result {
 			result.Length = len(body)
 			result.Title = clients.GetTitle(body)
 			result.Detect = "DiscoveredRequestFastjson"
-			result.Fingerprints = []FingerprintMatch{{Name: "fastjson"}}
+			result.Fingerprints = []FingerprintMatch{{Name: "Fastjson", HighRisk: true}}
 		}
 
 		results = append(results, result)

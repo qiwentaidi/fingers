@@ -97,6 +97,9 @@ func TestScanDiscoveredRequestsShiroProbeSkipsRootAndPreservesCookieEvidence(t *
 		len(fingerprints[0].Fingerprints) != 1 || fingerprints[0].Fingerprints[0].Name != "Shiro" {
 		t.Fatalf("unexpected Shiro fingerprint: %#v", fingerprints[0])
 	}
+	if !fingerprints[0].Fingerprints[0].HighRisk {
+		t.Fatalf("expected discovered Shiro fingerprint to be high risk: %#v", fingerprints[0].Fingerprints[0])
+	}
 	if fingerprints[0].StatusCode != http.StatusOK || fingerprints[0].Detect != "DiscoveredRequestShiro" {
 		t.Fatalf("expected Shiro result fields, got %#v", fingerprints[0])
 	}
@@ -149,6 +152,9 @@ func TestScanDiscoveredRequestsEmitsFastjsonFingerprintForProbeHit(t *testing.T)
 	if len(fingerprints) != 1 || fingerprints[0].URL != server.URL+"/api/orders" ||
 		len(fingerprints[0].Fingerprints) != 1 || fingerprints[0].Fingerprints[0].Name != "fastjson" {
 		t.Fatalf("unexpected Fastjson fingerprints: %#v", fingerprints)
+	}
+	if !fingerprints[0].Fingerprints[0].HighRisk {
+		t.Fatalf("expected discovered Fastjson fingerprint to be high risk: %#v", fingerprints[0].Fingerprints[0])
 	}
 	if fingerprints[0].StatusCode != http.StatusCreated || fingerprints[0].Length != len(`{"fastjson-version":"1.2.83"}`) ||
 		fingerprints[0].Detect != "DiscoveredRequestFastjson" {
