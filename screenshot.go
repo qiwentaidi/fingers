@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
@@ -102,6 +103,12 @@ func newScreenshotBrowser(parent context.Context, maxTabs int, proxy string) (*s
 		cancelAllocator()
 		_ = os.RemoveAll(tempDir)
 		return nil, enrichChromedpStartError(err)
+	}
+	if err := chromedp.Run(browserCtx, browser.SetDownloadBehavior(browser.SetDownloadBehaviorBehaviorDeny)); err != nil {
+		cancelBrowser()
+		cancelAllocator()
+		_ = os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("设置 chromedp 下载策略失败: %w", err)
 	}
 
 	return &screenshotBrowser{
