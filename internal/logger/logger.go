@@ -39,6 +39,29 @@ func (l *Logger) SetWriter(w io.Writer) {
 	l.writer = w
 }
 
+func (l *Logger) ConfigureWriter(w io.Writer) func() {
+	if w == nil {
+		return func() {}
+	}
+
+	l.mu.Lock()
+	previous := l.writer
+	previousColor := l.enableColor
+	l.writer = w
+	l.enableColor = false
+	l.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.writer = previous
+			l.enableColor = previousColor
+		})
+	}
+}
+
 func (l *Logger) SetOutput(enabled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

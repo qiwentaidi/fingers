@@ -1,6 +1,9 @@
 package fingers
 
-import "io/fs"
+import (
+	"io"
+	"io/fs"
+)
 
 type Tag struct {
 	ProductName string
@@ -98,6 +101,7 @@ type Options struct {
 	EnableAssetTagProbe   bool
 	EnableRawResponse     bool
 	DisableDefaultOutput  bool
+	LogOutput             io.Writer
 	FingerprintData       []byte
 	FingerprintPath       string
 	FingerprintFS         fs.FS

@@ -2,6 +2,7 @@ package fingers
 
 import (
 	"context"
+	"io"
 	"io/fs"
 	"path"
 	"strings"
@@ -148,6 +149,13 @@ func WithRawResponse(enabled bool) FingersSDKOptions {
 func WithDefaultOutput(enabled bool) FingersSDKOptions {
 	return func(opts *root.Options) error {
 		opts.DisableDefaultOutput = !enabled
+		return nil
+	}
+}
+
+func WithLogOutput(w io.Writer) FingersSDKOptions {
+	return func(opts *root.Options) error {
+		opts.LogOutput = w
 		return nil
 	}
 }

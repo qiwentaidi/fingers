@@ -8,6 +8,9 @@ import (
 )
 
 func NewScanner(options Options) (*FingerScanner, error) {
+	restoreLogOutput := logger.Default.ConfigureWriter(options.LogOutput)
+	defer restoreLogOutput()
+
 	if options.Thread <= 0 {
 		options.Thread = 30
 	}
@@ -65,6 +68,9 @@ func loadFingerprintRepository(options Options) (*FingerprintRepository, error) 
 }
 
 func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error {
+	restoreLogOutput := logger.Default.ConfigureWriter(s.logOutput)
+	defer restoreLogOutput()
+
 	needInitialLoadDiscovery := s.deepScan
 	if s.screenshot || needInitialLoadDiscovery {
 		browser, err := newScreenshotBrowser(ctx, defaultScreenshotMaxTabs, s.proxy)

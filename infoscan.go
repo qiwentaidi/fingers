@@ -3,6 +3,7 @@ package fingers
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	stdhttputil "net/http/httputil"
 	"net/url"
@@ -63,6 +64,7 @@ type FingerScanner struct {
 	faviconStore          assetStore
 	screenshotStore       assetStore
 	screenshotBrowser     *screenshotBrowser
+	logOutput             io.Writer
 	// dnsxClient              *dnsx.DNSX
 	basicURLWithFingerprint  map[string][]string // 后续nuclei需要扫描的目标列表
 	mutex                    sync.RWMutex
@@ -123,6 +125,7 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		enableDefaultOutput:      !options.DisableDefaultOutput,
 		faviconStore:             faviconStore,
 		screenshotStore:          screenshotStore,
+		logOutput:                options.LogOutput,
 		basicURLWithFingerprint:  basicURLWithFingerprint,
 		jsContextPaths:           make(map[string][]string),
 		jsContextCache:           make(map[string]*jsContextCacheEntry),

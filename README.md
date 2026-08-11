@@ -179,6 +179,8 @@ engine, err := fingers.NewFingersEngine(
     fingers.WithThread(30),
     fingers.WithDeepScan(true),
     fingers.WithDefaultOutput(false),
+    // SDK 嵌入业务系统时，可把默认日志接到宿主自己的日志 writer。
+    // fingers.WithLogOutput(appLogWriter),
     fingers.WithAssetStorage(fingers.AssetStorageConfig{
         Mode: fingers.StorageModeLocal,
         Local: &fingers.LocalStorageConfig{
