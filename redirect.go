@@ -9,6 +9,7 @@ var (
 	reg1 = regexp.MustCompile(`(?i)<meta.*?http-equiv=.*?refresh.*?url=(.*?)/?>`)
 	reg2 = regexp.MustCompile(`(?i)[window\.]?location[\.href]?.*?=.*?["'](.*?)["']`)
 	reg3 = regexp.MustCompile(`(?i)window\.location\.replace\(['"](.*?)['"]\)`)
+	reg4 = regexp.MustCompile(`(?is)\bheader\s*\(\s*["']location\s*:\s*([^"']+)["']`)
 )
 
 // https://github.com/SleepingBag945/dddd/blob/4c428a7c171275bfbb5fa72c2fb4bd7b48f4ff4a/lib/httpx/runner/runner.go#L570
@@ -31,6 +32,10 @@ func checkJSRedirect(Raw string) string {
 	matches = reg3.FindAllStringSubmatch(body, -1)
 	if len(matches) > 0 {
 		return strings.Trim(matches[0][1], "\"")
+	}
+	matches = reg4.FindAllStringSubmatch(body, -1)
+	if len(matches) > 0 {
+		return strings.Trim(matches[0][1], "\"'")
 	}
 	return ""
 }

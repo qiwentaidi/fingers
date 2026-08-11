@@ -191,11 +191,14 @@ func (s *FingerScanner) discoverPageCandidateTarget(ctx context.Context, target 
 }
 
 func extractHTMLPageReferences(body []byte) []string {
+	refs := make([]string, 0)
+	if redirectPath := checkJSRedirect(string(body)); redirectPath != "" {
+		refs = append(refs, redirectPath)
+	}
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
-		return nil
+		return refs
 	}
-	refs := make([]string, 0)
 	doc.Find("a[href],area[href],iframe[src],frame[src],link[rel='canonical'][href]").Each(func(_ int, selection *goquery.Selection) {
 		if value, ok := selection.Attr("href"); ok {
 			refs = append(refs, value)

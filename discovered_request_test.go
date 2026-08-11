@@ -1,9 +1,12 @@
 package fingers
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -32,6 +35,98 @@ func TestNormalizeWrappedProtocolTarget(t *testing.T) {
 				t.Fatalf("normalizeWrappedProtocolTarget(%q) = %q, want %q", tt.raw, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAutoTriggerFormsScriptHandlesMissingDocumentBody(t *testing.T) {
+	if strings.Contains(autoTriggerFormsScript, "roots = [document.body];") {
+		t.Fatal("auto trigger script must not enqueue document.body without a nil guard")
+	}
+	if !strings.Contains(autoTriggerFormsScript, "var fallbackRoot = document.body || document.documentElement;") {
+		t.Fatal("auto trigger script should fall back to documentElement when document.body is missing")
+	}
+	if !strings.Contains(autoTriggerFormsScript, "if (!root) continue;") {
+		t.Fatal("auto trigger script should skip nil roots before reading marker properties")
+	}
+}
+
+func TestPreflightHeadlessDocumentAllowsHTMLResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>ok</body></html>`))
+	}))
+	defer server.Close()
+
+	if err := preflightHeadlessDocument(context.Background(), server.URL, ""); err != nil {
+		t.Fatalf("expected HTML response to be allowed, got %v", err)
+	}
+}
+
+func TestPreflightHeadlessDocumentSkipsAttachmentResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", `attachment; filename="index.html"`)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>download</body></html>`))
+	}))
+	defer server.Close()
+
+	err := preflightHeadlessDocument(context.Background(), server.URL, "")
+	if err == nil || !strings.Contains(err.Error(), "unsupported document response") {
+		t.Fatalf("expected attachment response to be skipped, got %v", err)
+	}
+}
+
+func TestPreflightHeadlessDocumentSkipsForcedDownloadMIMEType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>download</body></html>`))
+	}))
+	defer server.Close()
+
+	err := preflightHeadlessDocument(context.Background(), server.URL, "")
+	if err == nil || !strings.Contains(err.Error(), "unsupported document response") {
+		t.Fatalf("expected octet-stream response to be skipped, got %v", err)
+	}
+}
+
+func TestPreflightHeadlessDocumentSkipsPHPSourceMIMEType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-httpd-php")
+		_, _ = w.Write([]byte(`<?php header('Location: web/manager/#/');`))
+	}))
+	defer server.Close()
+
+	err := preflightHeadlessDocument(context.Background(), server.URL, "")
+	if !errors.Is(err, errHeadlessNavigationSkipped) {
+		t.Fatalf("expected PHP source response to skip headless navigation, got %v", err)
+	}
+}
+
+func TestExtractHTMLPageReferencesIncludesPHPHeaderLocation(t *testing.T) {
+	refs := extractHTMLPageReferences([]byte(`<?php
+header('Location: web/manager/#/');
+`))
+
+	if len(refs) != 1 || refs[0] != "web/manager/#/" {
+		t.Fatalf("unexpected PHP header references: %#v", refs)
+	}
+}
+
+func TestCheckJSRedirectRecognizesPHPHeaderLocation(t *testing.T) {
+	if got := checkJSRedirect(`<?php header('Location: web/manager/#/');`); got != "web/manager/#/" {
+		t.Fatalf("unexpected PHP header redirect: %q", got)
+	}
+}
+
+func TestHeadlessPageLoadSoftErrorMatchesBrowserProtocolAborts(t *testing.T) {
+	if !isHeadlessPageLoadSoftError(errors.New("page load error net::ERR_ABORTED")) {
+		t.Fatal("expected ERR_ABORTED navigation to be treated as a soft headless page-load error")
+	}
+	if !isHeadlessPageLoadSoftError(errors.New("page load error net::ERR_SSL_PROTOCOL_ERROR")) {
+		t.Fatal("expected ERR_SSL_PROTOCOL_ERROR navigation to be treated as a soft headless page-load error")
+	}
+	if isHeadlessPageLoadSoftError(errors.New("page load error net::ERR_CONNECTION_RESET")) {
+		t.Fatal("connection reset should remain a normal headless error")
 	}
 }
 

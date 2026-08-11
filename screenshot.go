@@ -39,6 +39,8 @@ const (
 	maxCapturedAPIResponseSize = 512 * 1024
 )
 
+var errHeadlessNavigationSkipped = errors.New("headless navigation skipped")
+
 type capturedAPIResponse struct {
 	URL  string
 	Body []byte
@@ -58,6 +60,7 @@ type screenshotBrowser struct {
 	browserCancel context.CancelFunc
 	browserCtx    context.Context
 	tempDir       string
+	proxy         string
 	tabSlots      chan struct{}
 }
 
@@ -116,6 +119,7 @@ func newScreenshotBrowser(parent context.Context, maxTabs int, proxy string) (*s
 		browserCancel: cancelBrowser,
 		browserCtx:    browserCtx,
 		tempDir:       tempDir,
+		proxy:         proxy,
 		tabSlots:      make(chan struct{}, maxTabs),
 	}, nil
 }
@@ -135,6 +139,12 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 	}
 	if b == nil || b.browserCtx == nil {
 		return result, fmt.Errorf("headless browser is not initialized")
+	}
+	if err := preflightHeadlessDocument(ctx, targetURL, b.proxy); err != nil {
+		if errors.Is(err, errHeadlessNavigationSkipped) {
+			return result, nil
+		}
+		return result, err
 	}
 	select {
 	case b.tabSlots <- struct{}{}:
@@ -222,6 +232,9 @@ func (b *screenshotBrowser) CapturePageLoad(ctx context.Context, targetURL strin
 			return values.filter(Boolean);
 		})()`, &domURLs),
 	)
+	if isHeadlessPageLoadSoftError(err) {
+		return result, nil
+	}
 	mu.Lock()
 	requestIDs := make([]network.RequestID, 0, len(finishedResponses))
 	for requestID := range finishedResponses {
@@ -286,6 +299,79 @@ func limitCapturedText(value string, limit int) string {
 		return value
 	}
 	return value[:limit]
+}
+
+func preflightHeadlessDocument(ctx context.Context, targetURL string, proxy string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+	if proxy = strings.TrimSpace(proxy); proxy != "" {
+		proxyURL, parseErr := url.Parse(proxy)
+		if parseErr == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+	client := &http.Client{
+		Timeout:   screenshotSoftTimeout,
+		Transport: transport,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// If the preflight cannot reach a target, keep the historical browser
+		// path. Some internal sites only behave correctly in Chrome.
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if isDownloadContentDisposition(resp.Header.Get("Content-Disposition")) {
+		return fmt.Errorf("%w for unsupported document response: content-disposition %q", errHeadlessNavigationSkipped, resp.Header.Get("Content-Disposition"))
+	}
+	contentType := normalizedContentType(resp.Header.Get("Content-Type"))
+	if isUnsupportedHeadlessDocumentMIMEType(contentType) {
+		return fmt.Errorf("%w for unsupported document response: content-type %q", errHeadlessNavigationSkipped, resp.Header.Get("Content-Type"))
+	}
+	return nil
+}
+
+func normalizedContentType(value string) string {
+	if idx := strings.Index(value, ";"); idx >= 0 {
+		value = value[:idx]
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func isDownloadContentDisposition(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "attachment") || strings.Contains(value, "filename=")
+}
+
+func isUnsupportedHeadlessDocumentMIMEType(contentType string) bool {
+	switch contentType {
+	case "application/octet-stream", "application/force-download", "application/download", "binary/octet-stream",
+		"application/x-httpd-php", "application/x-php":
+		return true
+	default:
+		return false
+	}
+}
+
+func isHeadlessPageLoadSoftError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "net::ERR_ABORTED") ||
+		strings.Contains(message, "net::ERR_SSL_PROTOCOL_ERROR")
 }
 
 const autoTriggerFormsScript = `(function () {
@@ -356,9 +442,13 @@ const autoTriggerFormsScript = `(function () {
   var roots = Array.prototype.slice.call(document.querySelectorAll("form,.login-form,.login,.ant-form,.el-form,[role='form']")).filter(function (root) {
     return isVisible(root) || fields(root).length > 0;
   });
-  if (!roots.length) roots = [document.body];
+  if (!roots.length) {
+    var fallbackRoot = document.body || document.documentElement;
+    if (fallbackRoot) roots = [fallbackRoot];
+  }
   for (var i = 0; i < roots.length; i++) {
     var root = roots[i];
+    if (!root) continue;
     if (root.__fingersAutoTriggered) continue;
     var items = fields(root);
     if (!items.length) continue;
@@ -478,6 +568,10 @@ func (s *FingerScanner) captureScreenshot(ctx context.Context, targetURL string)
 }
 
 func (b *screenshotBrowser) Capture(ctx context.Context, targetURL string, store assetStore, enableLog bool) (string, error) {
+	if err := preflightHeadlessDocument(ctx, targetURL, b.proxy); err != nil {
+		return "", err
+	}
+
 	baseName := renameOutput(targetURL)
 	objectName := baseName + ".webp"
 
