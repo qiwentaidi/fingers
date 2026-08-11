@@ -8,6 +8,33 @@ import (
 	"testing"
 )
 
+func TestNormalizeWrappedProtocolTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "ftp wrapped in https authority",
+			raw:  "https://ftp//127.0.0.1:21",
+			want: "ftp://127.0.0.1:21",
+		},
+		{
+			name: "ordinary http double slash path",
+			raw:  "http://example.com//assets/app.js",
+			want: "http://example.com//assets/app.js",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeWrappedProtocolTarget(tt.raw); got != tt.want {
+				t.Fatalf("normalizeWrappedProtocolTarget(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSelectShiroCandidatesUsesOnlyDynamicNonRootEndpointURLs(t *testing.T) {
 	candidates := SelectShiroCandidates("https://example.com", []DiscoveredRequest{
 		{URL: "https://example.com/"},

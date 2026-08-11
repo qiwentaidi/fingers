@@ -19,6 +19,9 @@ const (
 	contextActiveDetectName   = "ActiveContext"
 	maxJSContextResourceBytes = 2 * 1024 * 1024
 	maxJSContextPaths         = 4
+	maxJSFingerprintResources = 12
+	maxJSFingerprintBytes     = 8 * 1024 * 1024
+	maxJSFingerprintFileBytes = 6 * 1024 * 1024
 )
 
 var (
@@ -49,6 +52,11 @@ type jsContextEvidence struct {
 type jsContextCacheEntry struct {
 	ready    chan struct{}
 	evidence jsContextEvidence
+}
+
+type jsBodyCacheEntry struct {
+	ready chan struct{}
+	body  []byte
 }
 
 type jsContextCandidateStats struct {
@@ -110,6 +118,106 @@ func extractPageJSSources(pageURL *url.URL, htmlBody []byte) ([]string, []string
 		}
 	})
 	return jsURLs, inlineScripts
+}
+
+func (s *FingerScanner) collectPageJSFingerprintBody(ctx context.Context, pageURL *url.URL, htmlBody []byte) []byte {
+	if s == nil || pageURL == nil || len(htmlBody) == 0 || ctx.Err() != nil {
+		return nil
+	}
+
+	jsURLs, inlineScripts := extractPageJSSources(pageURL, htmlBody)
+	if len(jsURLs) == 0 && len(inlineScripts) == 0 {
+		return nil
+	}
+
+	var combined []byte
+	appendContent := func(content []byte) bool {
+		content = bytes.TrimSpace(content)
+		if len(content) == 0 || len(combined) >= maxJSFingerprintBytes {
+			return len(combined) < maxJSFingerprintBytes
+		}
+		separatorBytes := 0
+		if len(combined) > 0 {
+			separatorBytes = 1
+		}
+		remaining := maxJSFingerprintBytes - len(combined) - separatorBytes
+		if remaining <= 0 {
+			return false
+		}
+		if len(content) > remaining {
+			content = content[:remaining]
+		}
+		if separatorBytes > 0 {
+			combined = append(combined, '\n')
+		}
+		combined = append(combined, content...)
+		return len(combined) < maxJSFingerprintBytes
+	}
+
+	for _, script := range inlineScripts {
+		if !appendContent([]byte(script)) {
+			return combined
+		}
+	}
+	for index, jsURL := range jsURLs {
+		if ctx.Err() != nil || index >= maxJSFingerprintResources {
+			break
+		}
+		if !appendContent(s.loadJSFingerprintBody(ctx, jsURL)) {
+			break
+		}
+	}
+	return combined
+}
+
+func (s *FingerScanner) loadJSFingerprintBody(ctx context.Context, jsURL string) []byte {
+	s.jsContextMutex.Lock()
+	if s.jsBodyCache == nil {
+		s.jsBodyCache = make(map[string]*jsBodyCacheEntry)
+	}
+	if cached, ok := s.jsBodyCache[jsURL]; ok {
+		s.jsContextMutex.Unlock()
+		select {
+		case <-cached.ready:
+			return append([]byte(nil), cached.body...)
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	entry := &jsBodyCacheEntry{ready: make(chan struct{})}
+	s.jsBodyCache[jsURL] = entry
+	s.jsContextMutex.Unlock()
+
+	body := s.fetchJSFingerprintBody(ctx, jsURL)
+	s.jsContextMutex.Lock()
+	entry.body = append([]byte(nil), body...)
+	close(entry.ready)
+	s.jsContextMutex.Unlock()
+	return body
+}
+
+func (s *FingerScanner) fetchJSFingerprintBody(ctx context.Context, jsURL string) []byte {
+	if s.client == nil {
+		return nil
+	}
+	resp, err := s.client.R().
+		SetContext(ctx).
+		SetHeaders(s.headers).
+		SetDoNotParseResponse(true).
+		Get(jsURL)
+	if err != nil || resp == nil || resp.RawResponse == nil || resp.RawResponse.Body == nil {
+		return nil
+	}
+	defer resp.RawResponse.Body.Close()
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 400 {
+		return nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.RawResponse.Body, maxJSFingerprintFileBytes+1))
+	if err != nil || len(body) > maxJSFingerprintFileBytes {
+		return nil
+	}
+	return body
 }
 
 func (s *FingerScanner) loadJSContextEvidence(ctx context.Context, pageURL *url.URL, jsURL string) jsContextEvidence {

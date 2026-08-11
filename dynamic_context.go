@@ -7,11 +7,9 @@ import (
 
 const maxPageDiscoveryHTMLBytes = 512 * 1024
 
-// storeJSContextPage keeps the response body for a possible static fallback.
-// Dynamic browser capture is preferred, so this body is only parsed when the
-// browser cannot start or does not observe any API roots.
-func (s *FingerScanner) storeJSContextPage(pageURL *url.URL, body []byte) {
-	if s == nil || pageURL == nil || len(body) == 0 {
+// storeJSContextPage keeps the initial page response for discovery decisions.
+func (s *FingerScanner) storeJSContextPage(pageURL *url.URL, body []byte, statusCode int) {
+	if s == nil || pageURL == nil {
 		return
 	}
 	if len(body) > maxPageDiscoveryHTMLBytes {
@@ -23,16 +21,29 @@ func (s *FingerScanner) storeJSContextPage(pageURL *url.URL, body []byte) {
 	if s.pageContextBodies == nil {
 		s.pageContextBodies = make(map[string][]byte)
 	}
-	s.pageContextBodies[contextOriginKey(pageURL)] = copyBody
+	if s.pageContextStatusCodes == nil {
+		s.pageContextStatusCodes = make(map[string]int)
+	}
+	key := contextOriginKey(pageURL)
+	s.pageContextBodies[key] = copyBody
+	s.pageContextStatusCodes[key] = statusCode
 }
 
-func (s *FingerScanner) pageContextBody(pageURL *url.URL) []byte {
+func (s *FingerScanner) pageContext(pageURL *url.URL) ([]byte, int, bool) {
 	if s == nil || pageURL == nil {
-		return nil
+		return nil, 0, false
 	}
 	s.jsContextMutex.Lock()
 	defer s.jsContextMutex.Unlock()
-	return append([]byte(nil), s.pageContextBodies[contextOriginKey(pageURL)]...)
+	key := contextOriginKey(pageURL)
+	body, bodyOK := s.pageContextBodies[key]
+	statusCode, statusOK := s.pageContextStatusCodes[key]
+	return append([]byte(nil), body...), statusCode, bodyOK || statusOK
+}
+
+func (s *FingerScanner) pageContextBody(pageURL *url.URL) []byte {
+	body, _, _ := s.pageContext(pageURL)
+	return body
 }
 
 func (s *FingerScanner) storeDiscoveredRequests(pageURL *url.URL, requests []DiscoveredRequest) {

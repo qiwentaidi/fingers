@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/qiwentaidi/fingers/internal/logger"
@@ -16,6 +18,7 @@ import (
 
 const (
 	maxDiscoveredPagesPerTarget = 12
+	defaultPageDiscoveryWorkers = 5
 )
 
 const (
@@ -37,6 +40,12 @@ type pageCandidate struct {
 	Score  int
 }
 
+type pageDiscoveryTarget struct {
+	URL        *url.URL
+	Body       []byte
+	HasContext bool
+}
+
 // discoverPageCandidates gathers only first-level pages exposed by the
 // original target. It does not crawl candidate pages or interact with them.
 func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
@@ -44,9 +53,51 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 		return
 	}
 
+	targets := s.pageDiscoveryTargets()
+	if len(targets) == 0 {
+		return
+	}
+
+	stage := "dynamic"
+	if s.screenshotBrowser != nil {
+		stage = "headless"
+	}
+	progress := newScanProgress(stage, len(targets), s.shouldPrintDefaultOutput())
+	defer progress.Finish()
+
+	workers := pageDiscoveryWorkerCount(len(targets))
+	jobs := make(chan pageDiscoveryTarget)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for target := range jobs {
+				s.discoverPageCandidateTarget(ctx, target, progress)
+			}
+		}()
+	}
+
+sendJobs:
+	for _, target := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case jobs <- target:
+		case <-ctx.Done():
+			break sendJobs
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func (s *FingerScanner) pageDiscoveryTargets() []pageDiscoveryTarget {
 	seenOrigins := make(map[string]struct{})
+	targets := make([]pageDiscoveryTarget, 0, len(s.aliveURLs))
 	for _, target := range s.aliveURLs {
-		if ctx.Err() != nil || target == nil || !isHTTPURL(target.String()) {
+		if target == nil || !isHTTPURL(target.String()) {
 			continue
 		}
 		origin := contextOriginKey(target)
@@ -55,50 +106,85 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 		}
 		seenOrigins[origin] = struct{}{}
 
-		if body := s.pageContextBody(target); len(body) > 0 {
-			// Static JS context evidence and page routes complement browser
-			// evidence; neither source suppresses the other.
-			s.discoverJSContextPaths(ctx, target, body)
-			for _, raw := range extractHTMLPageReferences(body) {
-				s.storePageCandidate(target, raw, discoveredLinkDetect)
-			}
-			for _, raw := range s.extractJSPageReferences(ctx, target, body) {
-				s.storePageCandidate(target, raw, jsRouteDetect)
-			}
-		}
-
-		if s.screenshotBrowser == nil {
+		body, statusCode, hasContext := s.pageContext(target)
+		if statusCode == http.StatusBadGateway || (hasContext && len(body) == 0) {
 			continue
 		}
-		capture, err := s.screenshotBrowser.CapturePageLoad(ctx, target.String())
-		if err != nil && s.shouldPrintDefaultOutput() {
-			logger.Default.Debug("[headless] capture page candidates for %s partially failed: %v", target, err)
+		targets = append(targets, pageDiscoveryTarget{URL: target, Body: body, HasContext: hasContext})
+	}
+	return targets
+}
+
+func pageDiscoveryWorkerCount(total int) int {
+	if total <= 0 {
+		return 0
+	}
+	if total < defaultPageDiscoveryWorkers {
+		return total
+	}
+	return defaultPageDiscoveryWorkers
+}
+
+func (s *FingerScanner) discoverPageCandidateTarget(ctx context.Context, target pageDiscoveryTarget, progress *scanProgress) {
+	defer progress.Processed()
+	if ctx.Err() != nil || target.URL == nil {
+		progress.Skipped()
+		return
+	}
+	if len(target.Body) > 0 {
+		// Static JS context evidence and page routes complement browser
+		// evidence; neither source suppresses the other.
+		s.discoverJSContextPaths(ctx, target.URL, target.Body)
+		for _, raw := range extractHTMLPageReferences(target.Body) {
+			s.storePageCandidate(target.URL, raw, discoveredLinkDetect)
 		}
-		s.storeDiscoveredRequests(target, capture.APIRequests)
-		dynamicPaths := make([]string, 0, len(capture.RequestURLs))
-		for _, raw := range capture.RequestURLs {
-			requestURL, parseErr := url.Parse(raw)
-			if parseErr != nil || !sameContextURL(target, requestURL) {
-				continue
-			}
-			dynamicPaths = append(dynamicPaths, requestURL.Path)
+		for _, raw := range s.extractJSPageReferences(ctx, target.URL, target.Body) {
+			s.storePageCandidate(target.URL, raw, jsRouteDetect)
 		}
-		s.storeJSContextPaths(target, deriveAPIContextPaths(dynamicPaths))
-		for _, raw := range capture.DOMURLs {
-			s.storePageCandidate(target, raw, renderedDOMDetect)
+	}
+
+	if s.screenshotBrowser == nil {
+		if len(target.Body) > 0 {
+			progress.Matched()
+		} else {
+			progress.Skipped()
 		}
-		for _, response := range capture.APIResponses {
-			responseURL, parseErr := url.Parse(response.URL)
-			if parseErr != nil || !sameContextURL(target, responseURL) {
-				continue
-			}
-			for _, raw := range extractJSONPageReferences(response.Body) {
-				// A root-relative route in an API response belongs to the document
-				// origin, not necessarily the API subdomain that returned it.
-				s.storePageCandidate(target, raw, apiResponseDetect)
-				for _, contextPath := range derivePageContextReferences(target, raw) {
-					s.storePageCandidate(target, contextPath, apiResponseContextDetect)
-				}
+		return
+	}
+	progress.Requested()
+	capture, err := s.screenshotBrowser.CapturePageLoad(ctx, target.URL.String())
+	if err != nil && s.shouldPrintDefaultOutput() {
+		logger.Default.Debug("[headless] capture page candidates for %s partially failed: %v", target.URL, err)
+	}
+	if err != nil {
+		progress.Failed()
+	} else {
+		progress.Matched()
+	}
+	s.storeDiscoveredRequests(target.URL, capture.APIRequests)
+	dynamicPaths := make([]string, 0, len(capture.RequestURLs))
+	for _, raw := range capture.RequestURLs {
+		requestURL, parseErr := url.Parse(raw)
+		if parseErr != nil || !sameContextURL(target.URL, requestURL) {
+			continue
+		}
+		dynamicPaths = append(dynamicPaths, requestURL.Path)
+	}
+	s.storeJSContextPaths(target.URL, deriveAPIContextPaths(dynamicPaths))
+	for _, raw := range capture.DOMURLs {
+		s.storePageCandidate(target.URL, raw, renderedDOMDetect)
+	}
+	for _, response := range capture.APIResponses {
+		responseURL, parseErr := url.Parse(response.URL)
+		if parseErr != nil || !sameContextURL(target.URL, responseURL) {
+			continue
+		}
+		for _, raw := range extractJSONPageReferences(response.Body) {
+			// A root-relative route in an API response belongs to the document
+			// origin, not necessarily the API subdomain that returned it.
+			s.storePageCandidate(target.URL, raw, apiResponseDetect)
+			for _, contextPath := range derivePageContextReferences(target.URL, raw) {
+				s.storePageCandidate(target.URL, contextPath, apiResponseContextDetect)
 			}
 		}
 	}
@@ -354,6 +440,6 @@ func (s *FingerScanner) scanDiscoveredPages(ctx context.Context, callback Result
 		if threads > 4 {
 			threads = 4
 		}
-		s.fingerScanTargets(ctx, callback, targets, threads)
+		s.fingerScanTargets(ctx, callback, targets, threads, "discovered-page")
 	}
 }

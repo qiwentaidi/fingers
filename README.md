@@ -244,10 +244,19 @@ EJB:
 
 说明：
 
-- `from` 目前支持：`body`、`header`、`title`、`server`、`cert`、`path`、`content_type`、`banner`
+- `from` 目前支持：`body`、`js_body`、`header`、`title`、`server`、`cert`、`path`、`content_type`、`banner`
 - `regex` 如果带捕获组，优先返回第一个捕获组
 - `regex` 如果不带捕获组，则返回整个命中字符串
 - 提取使用扫描阶段已经转为小写的内容源，行为与规则匹配保持一致
+
+规则字段还支持 `js_body`，用于匹配初始页面引用的同源 `<script>` 内容。`js_body` 会懒加载：只有普通字段无法判定表达式结果时才会下载 JS。例如二开若依页面正文已经去掉若依标识，但保留了 SPA 加载器和打包 JS 中的官方文档链接时，可以使用：
+
+```yaml
+RuoYi:
+  - name: 若依-管理系统
+    rule:
+      - '(body="/html/ie.html" || body="#loader-wrapper") && js_body="doc.ruoyi.vip"'
+```
 
 提取结果会出现在 `result.Fingerprints[i].Extractions` 中。
 

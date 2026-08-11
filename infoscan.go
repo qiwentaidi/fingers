@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/qiwentaidi/fingers/internal/cdncheck"
 	"github.com/qiwentaidi/fingers/internal/logger"
@@ -34,6 +33,8 @@ type WebInfo struct {
 	IconHash      string // mmh3
 	IconMd5       string // md5
 	BodyString    string
+	JSBodyString  string
+	JSBodyLoader  func() string
 	HeadeString   string
 	ContentType   string
 	Server        string
@@ -68,7 +69,9 @@ type FingerScanner struct {
 	jsContextMutex           sync.Mutex
 	jsContextPaths           map[string][]string
 	jsContextCache           map[string]*jsContextCacheEntry
+	jsBodyCache              map[string]*jsBodyCacheEntry
 	pageContextBodies        map[string][]byte
+	pageContextStatusCodes   map[string]int
 	discoveredRequestMutex   sync.Mutex
 	discoveredRequests       map[string][]DiscoveredRequest
 	pageDiscoveryMutex       sync.Mutex
@@ -86,6 +89,7 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		if !strings.Contains(t, "://") {
 			t = "http://" + t
 		}
+		t = normalizeWrappedProtocolTarget(t)
 
 		u, err := url.Parse(t)
 		if err != nil {
@@ -122,11 +126,60 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		basicURLWithFingerprint:  basicURLWithFingerprint,
 		jsContextPaths:           make(map[string][]string),
 		jsContextCache:           make(map[string]*jsContextCacheEntry),
+		jsBodyCache:              make(map[string]*jsBodyCacheEntry),
 		pageContextBodies:        make(map[string][]byte),
+		pageContextStatusCodes:   make(map[string]int),
 		discoveredRequests:       make(map[string][]DiscoveredRequest),
 		discoveredPageCandidates: make(map[string]map[string]pageCandidate),
 		headers:                  parseHeadersToMap(options.CustomHeaders, options.Headers),
 	}
+}
+
+var wrappedNonWebTargetSchemes = map[string]struct{}{
+	"amqp":       {},
+	"ftp":        {},
+	"imap":       {},
+	"ldap":       {},
+	"ldaps":      {},
+	"mongodb":    {},
+	"mqtt":       {},
+	"mysql":      {},
+	"oracle":     {},
+	"pop3":       {},
+	"postgres":   {},
+	"postgresql": {},
+	"rdp":        {},
+	"redis":      {},
+	"rtsp":       {},
+	"smb":        {},
+	"smtp":       {},
+	"snmp":       {},
+	"ssh":        {},
+	"tcp":        {},
+	"telnet":     {},
+	"udp":        {},
+	"vnc":        {},
+}
+
+func normalizeWrappedProtocolTarget(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || !strings.HasPrefix(u.Path, "//") {
+		return raw
+	}
+
+	wrappedScheme := strings.ToLower(u.Host)
+	if _, ok := wrappedNonWebTargetSchemes[wrappedScheme]; !ok {
+		return raw
+	}
+
+	normalized := wrappedScheme + ":" + u.Path
+	if u.RawQuery != "" {
+		normalized += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		normalized += "#" + u.Fragment
+	}
+	return normalized
 }
 
 func (s *FingerScanner) shouldPrintDefaultOutput() bool {
@@ -210,21 +263,25 @@ func (s *FingerScanner) FingerScan(ctrlCtx context.Context, callback ResultCallb
 			CaptureImage: true,
 		})
 	}
-	s.fingerScanTargets(ctrlCtx, callback, targets, s.thread)
+	s.fingerScanTargets(ctrlCtx, callback, targets, s.thread, "finger")
 }
 
 // fingerScanTargets runs the complete passive fingerprint database against a
 // bounded list of URLs. Discovered pages deliberately do not become active
 // scan targets, so path discovery remains one-level and side-effect free.
-func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback ResultCallback, targets []passiveScanTarget, threads int) {
+func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback ResultCallback, targets []passiveScanTarget, threads int, stage string) {
 	if threads <= 0 {
 		threads = 1
+	}
+	if stage == "" {
+		stage = "finger"
 	}
 	var wg sync.WaitGroup
 	single := make(chan struct{})
 	count := len(targets)
+	progress := newScanProgress(stage, count, s.shouldPrintDefaultOutput())
+	defer progress.Finish()
 	retChan := make(chan Result, count)
-	var id int32
 	go func() {
 		for pr := range retChan {
 			// 检查任务是否被取消
@@ -246,7 +303,6 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 					callback(pr)
 				}
 			}
-			s.IncreaseActiveProgress(&id, count)
 		}
 		close(single)
 	}()
@@ -255,12 +311,14 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 		u := scanTarget.URL
 		// 在函数入口检查 context
 		if ctrlCtx.Err() != nil || u == nil {
+			progress.Skipped()
 			return
 		}
 
 		// 非web资产目标将其直接绑定到后续漏洞扫描的目标组中，跳过后续的指纹扫描
 		if u.Scheme != "http" && u.Scheme != "https" {
 			s.basicURLWithFingerprint[u.String()] = append(s.basicURLWithFingerprint[u.String()], u.Scheme)
+			progress.Skipped()
 			return
 		}
 
@@ -273,6 +331,7 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 		)
 
 		// 先进行一次不会重定向的扫描，可以获得重定向前页面的响应头中获取指纹
+		progress.Requested()
 		resp, err := clients.DoRequest("GET", u.String(), s.headers, nil, 10, s.notFollowClient)
 		if err == nil && resp.StatusCode() >= 300 && resp.StatusCode() < 400 {
 			rawHeaders = httputil.DumpResponseHeadersOnly(resp.RawResponse)
@@ -283,6 +342,7 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 
 		// 在网络请求后检查 context
 		if ctrlCtx.Err() != nil {
+			progress.Skipped()
 			return
 		}
 
@@ -296,6 +356,7 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 				if s.shouldPrintDefaultOutput() {
 					logger.Default.Debug("request %s error: %v", u.String(), err)
 				}
+				progress.Failed()
 				return
 			}
 		}
@@ -323,6 +384,7 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 
 		// 在执行额外扫描前检查 context
 		if ctrlCtx.Err() != nil {
+			progress.Skipped()
 			return
 		}
 
@@ -344,23 +406,27 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 			// body = redirectBody
 		}
 		if scanTarget.RecordAlive && s.deepScan {
-			s.storeJSContextPage(finalURL, responseBody)
+			s.storeJSContextPage(finalURL, responseBody, resp.StatusCode())
 		}
 		// 网站正常响应
 		title := clients.GetTitle(body)
 		statusCode = resp.StatusCode()
 
 		if exclude, _ := excludeInterference(statusCode, title); exclude {
+			progress.Skipped()
 			return
 		}
 
 		server = resp.Header().Get("Server")
 		contentType = resp.Header().Get("Content-Type")
 		web := &WebInfo{
-			HeadeString:   strings.ToLower(string(rawHeaders)),
-			ContentType:   strings.ToLower(contentType),
-			Cert:          strings.ToLower(GetTLSString(finalURL.Scheme, finalURL.Host)),
-			BodyString:    strings.ToLower(string(body)),
+			HeadeString: strings.ToLower(string(rawHeaders)),
+			ContentType: strings.ToLower(contentType),
+			Cert:        strings.ToLower(GetTLSString(finalURL.Scheme, finalURL.Host)),
+			BodyString:  strings.ToLower(string(body)),
+			JSBodyLoader: func() string {
+				return strings.ToLower(string(s.collectPageJSFingerprintBody(ctrlCtx, finalURL, responseBody)))
+			},
 			Path:          strings.ToLower(finalURL.Path),
 			Title:         strings.ToLower(title),
 			Server:        strings.ToLower(server),
@@ -405,12 +471,17 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 		// the server answers with a plain 404 page; reporting those as fingerprint
 		// results produces noisy false discoveries.
 		if scanTarget.Detect != "" && scanTarget.Detect != "Default" && len(fingerprints) == 0 {
+			progress.Skipped()
 			return
 		}
 
 		// 在截屏前检查 context（截屏是耗时操作）
 		if ctrlCtx.Err() != nil {
+			progress.Skipped()
 			return
+		}
+		if len(fingerprints) > 0 {
+			progress.Matched()
 		}
 
 		// 截屏
@@ -458,7 +529,9 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 	}
 	threadPool, _ := ants.NewPoolWithFunc(threads, func(target interface{}) {
 		defer wg.Done()
+		defer progress.Processed()
 		if ctrlCtx.Err() != nil {
+			progress.Skipped()
 			return
 		}
 		fscan(target.(passiveScanTarget))
@@ -469,7 +542,11 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 			return
 		}
 		wg.Add(1)
-		threadPool.Invoke(target)
+		if err := threadPool.Invoke(target); err != nil {
+			progress.Skipped()
+			progress.Processed()
+			wg.Done()
+		}
 	}
 	wg.Wait()
 	close(retChan)
@@ -522,13 +599,15 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		return
 	}
 
-	var id int32
 	var wg sync.WaitGroup
 	visited := sync.Map{}        // 记录已访问路径
 	timeoutCounter := sync.Map{} // 记录每个目标的超时次数
 	seenAdminPathFingerprints := make(map[string]struct{})
 	single := make(chan struct{})
 	retChan := make(chan Result, len(s.urls))
+	count := s.ActiveCounts()
+	progress := newScanProgress("active", count, s.shouldPrintDefaultOutput())
+	defer progress.Finish()
 
 	go func() {
 		for pr := range retChan {
@@ -569,18 +648,31 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	// 主动指纹扫描线程池
 	threadPool, _ := ants.NewPoolWithFunc(s.thread, func(tfp interface{}) {
 		defer wg.Done()
+		defer progress.Processed()
 
 		// 在 goroutine 中检查 context
 		if ctx.Err() != nil {
+			progress.Skipped()
 			return
 		}
 
 		fp := tfp.(ActiveFingerDetect)
 		if fp.URL == nil {
+			progress.Skipped()
 			return
 		}
 		if fp.MultiPath != nil {
-			if result, ok := s.probeMultiPathFingerprint(ctx, fp, &timeoutCounter); ok {
+			progress.Requested()
+			result, ok, outcome := s.probeMultiPathFingerprint(ctx, fp, &timeoutCounter)
+			switch outcome {
+			case scanProgressOutcomeFailed:
+				progress.Failed()
+			case scanProgressOutcomeMatched:
+				progress.Matched()
+			default:
+				progress.Skipped()
+			}
+			if ok {
 				retChan <- result
 			}
 			return
@@ -596,6 +688,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			if s.shouldPrintDefaultOutput() {
 				logger.Default.Warning("Target %s has reached the timeout limit, skipping active scan", baseURL)
 			}
+			progress.Skipped()
 			return
 		}
 
@@ -604,17 +697,21 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		// only once, regardless of which detection class submitted it first.
 		visitKey := fullURL
 		if _, ok := visited.Load(visitKey); ok {
+			progress.Skipped()
 			return
 		}
 		visited.Store(visitKey, true)
 
+		progress.Requested()
 		resp, err := clients.DoRequest("GET", fullURL, s.headers, nil, 5, s.client)
 		if err != nil {
 			v, _ := timeoutCounter.LoadOrStore(baseURL, 1)
 			timeoutCounter.Store(baseURL, v.(int)+1)
+			progress.Failed()
 			return
 		}
 		if detect == adminPathDetectName && resp.StatusCode() == http.StatusNotFound {
+			progress.Skipped()
 			return
 		}
 		rawResponse := ""
@@ -624,6 +721,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 		// 在处理响应前检查 context
 		if ctx.Err() != nil {
+			progress.Skipped()
 			return
 		}
 
@@ -678,8 +776,10 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 			// 在保存结果前检查 context
 			if ctx.Err() != nil {
+				progress.Skipped()
 				return
 			}
+			progress.Matched()
 
 			if detect != adminPathDetectName {
 				s.mutex.Lock()
@@ -710,11 +810,19 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 				IconMd5:      faviconResult.Md5Hash,
 				RawResponse:  rawResponse,
 			}
+		} else {
+			progress.Skipped()
 		}
 	})
 	defer threadPool.Release()
-
-	count := s.ActiveCounts()
+	submitActiveTask := func(task ActiveFingerDetect) {
+		wg.Add(1)
+		if err := threadPool.Invoke(task); err != nil {
+			progress.Skipped()
+			progress.Processed()
+			wg.Done()
+		}
+	}
 
 	activePathMap := groupActiveFingerprintsByPath(s.getActiveFingerprintDB())
 	contextActivePathMap := groupActiveFingerprintsByPath(s.getContextActiveFingerprintDB())
@@ -743,20 +851,17 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 			}
 			base := activeTarget.String()
 			if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
-				s.IncreaseActiveProgress(&id, count)
+				progress.Skipped()
+				progress.Processed()
 				continue
 			}
 
 			multiPath := fingerprint
-			wg.Add(1)
-			s.IncreaseActiveProgress(&id, count)
-			if err := threadPool.Invoke(ActiveFingerDetect{
+			submitActiveTask(ActiveFingerDetect{
 				URL:       activeTarget,
 				MultiPath: &multiPath,
 				Detect:    "Active",
-			}); err != nil {
-				wg.Done()
-			}
+			})
 		}
 
 		activeProbeURLs := make(map[string]struct{}, len(activePathMap))
@@ -773,21 +878,17 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 			base := activeTarget.String()
 			if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
-				s.IncreaseActiveProgress(&id, count)
+				progress.Skipped()
+				progress.Processed()
 				continue
 			}
 
-			wg.Add(1)
-			s.IncreaseActiveProgress(&id, count)
-
-			if err := threadPool.Invoke(ActiveFingerDetect{
+			submitActiveTask(ActiveFingerDetect{
 				URL:    activeTarget,
 				Fpe:    fingers,
 				Path:   path,
 				Detect: "Active",
-			}); err != nil {
-				wg.Done()
-			}
+			})
 		}
 
 		for _, contextPath := range s.contextPathsForTarget(target) {
@@ -810,20 +911,17 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 				base := contextTarget.String()
 				if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
-					s.IncreaseActiveProgress(&id, count)
+					progress.Skipped()
+					progress.Processed()
 					continue
 				}
 
-				wg.Add(1)
-				s.IncreaseActiveProgress(&id, count)
-				if err := threadPool.Invoke(ActiveFingerDetect{
+				submitActiveTask(ActiveFingerDetect{
 					URL:    contextTarget,
 					Fpe:    fingers,
 					Path:   path,
 					Detect: contextActiveDetectName,
-				}); err != nil {
-					wg.Done()
-				}
+				})
 			}
 		}
 
@@ -839,21 +937,18 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 
 			base := activeTarget.String()
 			if val, ok := timeoutCounter.Load(base); ok && val.(int) >= s.activeTimeoutLimit {
-				s.IncreaseActiveProgress(&id, count)
+				progress.Skipped()
+				progress.Processed()
 				continue
 			}
 
-			wg.Add(1)
-			s.IncreaseActiveProgress(&id, count)
-			if err := threadPool.Invoke(ActiveFingerDetect{
+			submitActiveTask(ActiveFingerDetect{
 				URL:               activeTarget,
 				Fpe:               fullFingerprintDB,
 				Path:              path,
 				Detect:            adminPathDetectName,
 				KnownFingerprints: knownFingerprints,
-			}); err != nil {
-				wg.Done()
-			}
+			})
 		}
 	}
 
@@ -862,14 +957,14 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	<-single
 }
 
-func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task ActiveFingerDetect, timeoutCounter *sync.Map) (Result, bool) {
+func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task ActiveFingerDetect, timeoutCounter *sync.Map) (Result, bool, scanProgressOutcome) {
 	if task.URL == nil || task.MultiPath == nil || len(task.MultiPath.PathRules) == 0 {
-		return Result{}, false
+		return Result{}, false, scanProgressOutcomeSkipped
 	}
 
 	baseURL := task.URL.String()
 	if val, ok := timeoutCounter.Load(baseURL); ok && val.(int) >= s.activeTimeoutLimit {
-		return Result{}, false
+		return Result{}, false, scanProgressOutcomeSkipped
 	}
 
 	matched := make(map[string]FingerprintMatch)
@@ -882,7 +977,7 @@ func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task Acti
 
 	for _, pathRule := range task.MultiPath.PathRules {
 		if ctx.Err() != nil {
-			return Result{}, false
+			return Result{}, false, scanProgressOutcomeSkipped
 		}
 
 		fullURL := buildActiveProbeURL(task.URL, pathRule.Path)
@@ -890,7 +985,7 @@ func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task Acti
 		if err != nil {
 			v, _ := timeoutCounter.LoadOrStore(baseURL, 1)
 			timeoutCounter.Store(baseURL, v.(int)+1)
-			return Result{}, false
+			return Result{}, false, scanProgressOutcomeFailed
 		}
 
 		body := resp.Body()
@@ -919,7 +1014,7 @@ func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task Acti
 
 		pathMatches := Scan(web, pathRule.Fingerprints)
 		if len(pathMatches) == 0 {
-			return Result{}, false
+			return Result{}, false, scanProgressOutcomeSkipped
 		}
 		mergeFingerprintMatches(matched, pathMatches)
 
@@ -936,7 +1031,7 @@ func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task Acti
 	}
 
 	if firstWeb == nil || ctx.Err() != nil {
-		return Result{}, false
+		return Result{}, false, scanProgressOutcomeSkipped
 	}
 
 	var screenshotPath string
@@ -971,7 +1066,7 @@ func (s *FingerScanner) probeMultiPathFingerprint(ctx context.Context, task Acti
 		Detect:       "Active",
 		Screenshot:   screenshotPath,
 		RawResponse:  strings.Join(rawResponses, "\n\n--- path_rules response ---\n\n"),
-	}, true
+	}, true, scanProgressOutcomeMatched
 }
 
 func buildActiveProbeURL(base *url.URL, probePath string) string {
@@ -1079,7 +1174,12 @@ func (s *FingerScanner) ActiveCounts() int {
 	}
 
 	activePathCount := len(groupActiveFingerprintsByPath(s.getActiveFingerprintDB()))
-	multiPathCount := len(s.getMultiPathFingerprintDB())
+	multiPathCount := 0
+	for _, fingerprint := range s.getMultiPathFingerprintDB() {
+		if len(fingerprint.PathRules) > 0 {
+			multiPathCount++
+		}
+	}
 	adminPathCount := 0
 	if len(s.getFingerprintDB()) > 0 {
 		adminPathCount = len(basicAdminBackendPaths)
@@ -1124,19 +1224,20 @@ func (s *FingerScanner) ActiveCounts() int {
 	return total
 }
 
-func (s *FingerScanner) IncreaseActiveProgress(id *int32, total int) {
-	if !s.shouldPrintDefaultOutput() {
-		return
-	}
-	current := atomic.AddInt32(id, 1)
-	logger.Default.PrintRaw("\r[%d / %d]", current, total)
-	if current == int32(total) {
-		logger.Default.PrintRaw("\n")
-	}
-}
-
 func (s *FingerScanner) URLWithFingerprintMap() map[string][]string {
 	return s.basicURLWithFingerprint
+}
+
+func (web *WebInfo) JSBody() string {
+	if web == nil {
+		return ""
+	}
+	if web.JSBodyString != "" || web.JSBodyLoader == nil {
+		return web.JSBodyString
+	}
+	web.JSBodyString = web.JSBodyLoader()
+	web.JSBodyLoader = nil
+	return web.JSBodyString
 }
 
 func extractionSourceContent(web *WebInfo, source string) string {
@@ -1145,6 +1246,8 @@ func extractionSourceContent(web *WebInfo, source string) string {
 		return web.HeadeString
 	case "body":
 		return web.BodyString
+	case "js_body", "js":
+		return web.JSBody()
 	case "server":
 		return web.Server
 	case "title":
@@ -1273,64 +1376,23 @@ func Scan(web *WebInfo, targetDB []FingerEntity) []FingerprintMatch {
 	fingerprintMap := make(map[string]*FingerprintMatch)
 
 	for _, finger := range targetDB {
-		expr := finger.AllString
-		for _, rule := range finger.Rule {
-			var result bool
-			switch rule.Key {
-			case "header":
-				result = dataCheckString(rule.Op, web.HeadeString, rule.ValueLC)
-			case "body":
-				result = dataCheckString(rule.Op, web.BodyString, rule.ValueLC)
-			case "server":
-				result = dataCheckString(rule.Op, web.Server, rule.ValueLC)
-			case "title":
-				result = dataCheckString(rule.Op, web.Title, rule.ValueLC)
-			case "cert":
-				result = dataCheckString(rule.Op, web.Cert, rule.ValueLC)
-			case "port":
-				value, err := strconv.Atoi(rule.Value)
-				if err == nil {
-					result = dataCheckInt(rule.Op, web.Port, value)
-				}
-			case "protocol":
-				result = (rule.Op == 0 && web.Protocol == rule.ValueLC) || (rule.Op == 1 && web.Protocol != rule.ValueLC)
-			case "path":
-				result = dataCheckString(rule.Op, web.Path, rule.ValueLC)
-			case "icon_hash":
-				value, err := strconv.Atoi(rule.Value)
-				hashIcon, errHash := strconv.Atoi(web.IconHash)
-				if err == nil && errHash == nil {
-					result = dataCheckInt(rule.Op, hashIcon, value)
-				}
-			case "icon_md5", "icon_mdhash":
-				result = dataCheckString(rule.Op, web.IconMd5, rule.ValueLC)
-			case "status":
-				value, err := strconv.Atoi(rule.Value)
-				if err == nil {
-					result = dataCheckInt(rule.Op, web.StatusCode, value)
-				}
-			case "body_length":
-				value, err := strconv.Atoi(rule.Value)
-				if err == nil {
-					result = dataCheckInt(rule.Op, web.ContentLength, value)
-				}
-			case "content_type":
-				result = dataCheckString(rule.Op, web.ContentType, rule.ValueLC)
-			case "banner":
-				result = dataCheckString(rule.Op, web.Banner, rule.ValueLC)
-			}
-
-			if result {
-				expr = expr[:rule.Start] + "T" + expr[rule.End:]
-			} else {
-				expr = expr[:rule.Start] + "F" + expr[rule.End:]
-			}
+		if _, exists := fingerprintMap[finger.ProductName]; exists && fingerHasRuleKey(finger, "js_body") {
+			continue
 		}
 
-		r, err := boolEval(expr)
+		expr, _ := buildFingerprintExpression(finger, web, false)
+		r, known, err := boolEvalWithUnknown(expr)
 		if err != nil {
 			logger.Default.Warning("[fingerprint] 错误指纹: %v", finger.AllString)
 			continue
+		}
+		if !known {
+			expr, _ = buildFingerprintExpression(finger, web, true)
+			r, err = boolEval(expr)
+			if err != nil {
+				logger.Default.Warning("[fingerprint] 错误指纹: %v", finger.AllString)
+				continue
+			}
 		}
 		if r {
 			match, exists := fingerprintMap[finger.ProductName]
@@ -1372,6 +1434,96 @@ func Scan(web *WebInfo, targetDB []FingerEntity) []FingerprintMatch {
 		results = append(results, *match)
 	}
 	return results
+}
+
+func buildFingerprintExpression(finger FingerEntity, web *WebInfo, includeJSBody bool) (string, bool) {
+	expr := finger.AllString
+	hasUnknown := false
+	for _, rule := range finger.Rule {
+		replacement := "F"
+		if isJSBodyRule(rule) && !includeJSBody {
+			replacement = "U"
+			hasUnknown = true
+		} else if evaluateWebRule(rule, web) {
+			replacement = "T"
+		}
+		expr = expr[:rule.Start] + replacement + expr[rule.End:]
+	}
+	return expr, hasUnknown
+}
+
+func boolEvalWithUnknown(expr string) (bool, bool, error) {
+	if !strings.Contains(expr, "U") {
+		result, err := boolEval(expr)
+		return result, true, err
+	}
+
+	trueResult, err := boolEval(strings.ReplaceAll(expr, "U", "T"))
+	if err != nil {
+		return false, false, err
+	}
+	falseResult, err := boolEval(strings.ReplaceAll(expr, "U", "F"))
+	if err != nil {
+		return false, false, err
+	}
+	if trueResult == falseResult {
+		return trueResult, true, nil
+	}
+	return false, false, nil
+}
+
+func evaluateWebRule(rule RuleData, web *WebInfo) bool {
+	switch rule.Key {
+	case "header":
+		return dataCheckString(rule.Op, web.HeadeString, rule.ValueLC)
+	case "body":
+		return dataCheckString(rule.Op, web.BodyString, rule.ValueLC)
+	case "js_body":
+		return dataCheckString(rule.Op, web.JSBody(), rule.ValueLC)
+	case "server":
+		return dataCheckString(rule.Op, web.Server, rule.ValueLC)
+	case "title":
+		return dataCheckString(rule.Op, web.Title, rule.ValueLC)
+	case "cert":
+		return dataCheckString(rule.Op, web.Cert, rule.ValueLC)
+	case "port":
+		value, err := strconv.Atoi(rule.Value)
+		return err == nil && dataCheckInt(rule.Op, web.Port, value)
+	case "protocol":
+		return (rule.Op == 0 && web.Protocol == rule.ValueLC) || (rule.Op == 1 && web.Protocol != rule.ValueLC)
+	case "path":
+		return dataCheckString(rule.Op, web.Path, rule.ValueLC)
+	case "icon_hash":
+		value, err := strconv.Atoi(rule.Value)
+		hashIcon, errHash := strconv.Atoi(web.IconHash)
+		return err == nil && errHash == nil && dataCheckInt(rule.Op, hashIcon, value)
+	case "icon_md5", "icon_mdhash":
+		return dataCheckString(rule.Op, web.IconMd5, rule.ValueLC)
+	case "status":
+		value, err := strconv.Atoi(rule.Value)
+		return err == nil && dataCheckInt(rule.Op, web.StatusCode, value)
+	case "body_length":
+		value, err := strconv.Atoi(rule.Value)
+		return err == nil && dataCheckInt(rule.Op, web.ContentLength, value)
+	case "content_type":
+		return dataCheckString(rule.Op, web.ContentType, rule.ValueLC)
+	case "banner":
+		return dataCheckString(rule.Op, web.Banner, rule.ValueLC)
+	}
+	return false
+}
+
+func fingerHasRuleKey(finger FingerEntity, key string) bool {
+	for _, rule := range finger.Rule {
+		if strings.EqualFold(rule.Key, key) || (key == "js_body" && strings.EqualFold(rule.Key, "js")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isJSBodyRule(rule RuleData) bool {
+	return strings.EqualFold(rule.Key, "js_body") || strings.EqualFold(rule.Key, "js")
 }
 
 func (s *FingerScanner) GetJSRedirectResponse(u *url.URL, respRaw string) []byte {

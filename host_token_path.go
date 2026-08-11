@@ -248,14 +248,26 @@ func (s *FingerScanner) probeHostTokenPaths(ctx context.Context, tasks []hostTok
 
 	var wg sync.WaitGroup
 	retChan := make(chan hostTokenPathProbeResult, len(tasks))
+	progress := newScanProgress("host-token", len(tasks), s.shouldPrintDefaultOutput())
+	defer progress.Finish()
 	thread := s.thread
 	if thread <= 0 {
 		thread = 1
 	}
 	threadPool, err := ants.NewPoolWithFunc(thread, func(raw interface{}) {
 		defer wg.Done()
+		defer progress.Processed()
 		task := raw.(hostTokenPathProbeTask)
-		retChan <- s.probeHostTokenPathResponse(ctx, task)
+		progress.Requested()
+		result := s.probeHostTokenPathResponse(ctx, task)
+		if !result.probed {
+			progress.Failed()
+		} else if result.reachable {
+			progress.Matched()
+		} else {
+			progress.Skipped()
+		}
+		retChan <- result
 	})
 	if err != nil {
 		return nil
@@ -268,6 +280,8 @@ func (s *FingerScanner) probeHostTokenPaths(ctx context.Context, tasks []hostTok
 		}
 		wg.Add(1)
 		if err := threadPool.Invoke(task); err != nil {
+			progress.Skipped()
+			progress.Processed()
 			wg.Done()
 		}
 	}
@@ -291,18 +305,25 @@ func (s *FingerScanner) probeHostTokenActivePaths(ctx context.Context, tasks []h
 		result Result
 		known  []string
 	}, len(tasks))
+	progress := newScanProgress("host-token-active", len(tasks), s.shouldPrintDefaultOutput())
+	defer progress.Finish()
 	thread := s.thread
 	if thread <= 0 {
 		thread = 1
 	}
 	threadPool, err := ants.NewPoolWithFunc(thread, func(raw interface{}) {
 		defer wg.Done()
+		defer progress.Processed()
 		task := raw.(hostTokenActivePathProbeTask)
+		progress.Requested()
 		if result, ok := s.probeHostTokenActivePath(ctx, task); ok {
+			progress.Matched()
 			resultChan <- struct {
 				result Result
 				known  []string
 			}{result: result, known: task.knownFingerprints}
+		} else {
+			progress.Skipped()
 		}
 	})
 	if err != nil {
@@ -316,6 +337,8 @@ func (s *FingerScanner) probeHostTokenActivePaths(ctx context.Context, tasks []h
 		}
 		wg.Add(1)
 		if err := threadPool.Invoke(task); err != nil {
+			progress.Skipped()
+			progress.Processed()
 			wg.Done()
 		}
 	}
