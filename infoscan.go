@@ -737,7 +737,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 		faviconResult := FaviconResult{}
 		if isImagePath(fullURL) {
 			faviconResult = hashIconBytes(body)
-		} else if detect == adminPathDetectName {
+		} else {
 			if probeURL, parseErr := url.Parse(fullURL); parseErr == nil {
 				faviconResult = getFaviconWithStorage(probeURL, s.headers, s.client, s.faviconStore)
 			}

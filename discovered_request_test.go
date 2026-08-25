@@ -6,9 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/go-resty/resty/v2"
 )
 
 func TestNormalizeWrappedProtocolTarget(t *testing.T) {
@@ -319,5 +323,74 @@ func TestScanDiscoveredRequestsKeepsJSONRequestFingerprintWithoutFastjsonHit(t *
 	if fingerprints[0].StatusCode != http.StatusCreated || fingerprints[0].Length != len(`{"accepted":true}`) ||
 		fingerprints[0].Detect != "dynamic-browser-capture" {
 		t.Fatalf("expected captured JSON metadata to be retained, got %#v", fingerprints[0])
+	}
+}
+
+func TestActiveFingerScanCollectsFaviconForHTMLPath(t *testing.T) {
+	iconBody := []byte("nacos logo")
+	iconHash := Mmh3Hash32(iconBody)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nacos/":
+			_, _ = w.Write([]byte(`<html><head><title>Nacos</title><link rel="shortcut icon" href="console-ui/public/img/nacos-logo.png"></head><body>nacos</body></html>`))
+		case "/nacos/console-ui/public/img/nacos-logo.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(iconBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+
+	rule := `icon_hash="` + iconHash + `"`
+	scanner := &FingerScanner{
+		aliveURLs: []*url.URL{target},
+		fingerprintRepo: BuildFingerprintRepository([]FingerEntity{{
+			ProductName: "Nacos Icon",
+			AllString:   rule,
+			Path:        []string{"/nacos/"},
+			Rule:        ParseRule(rule),
+		}}),
+		activeTimeoutLimit:      5,
+		thread:                  1,
+		client:                  resty.New(),
+		basicURLWithFingerprint: map[string][]string{},
+		faviconStore:            &localStore{baseDir: t.TempDir()},
+	}
+
+	var results []Result
+	scanner.ActiveFingerScan(context.Background(), func(result Result) {
+		if result.Detect == "Active" {
+			results = append(results, result)
+		}
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("got %d active results, want 1: %#v", len(results), results)
+	}
+	result := results[0]
+	if result.IconHash != iconHash {
+		t.Fatalf("IconHash = %q, want %q", result.IconHash, iconHash)
+	}
+	if result.FaviconURL != server.URL+"/nacos/console-ui/public/img/nacos-logo.png" {
+		t.Fatalf("FaviconURL = %q", result.FaviconURL)
+	}
+	if result.Favicon == "" {
+		t.Fatal("Favicon path is empty")
+	}
+	storedIcon, err := os.ReadFile(result.Favicon)
+	if err != nil {
+		t.Fatalf("read saved favicon: %v", err)
+	}
+	if string(storedIcon) != string(iconBody) {
+		t.Fatalf("saved favicon = %q, want %q", storedIcon, iconBody)
+	}
+	if len(result.Fingerprints) != 1 || result.Fingerprints[0].Name != "Nacos Icon" {
+		t.Fatalf("Fingerprints = %#v, want Nacos Icon", result.Fingerprints)
 	}
 }
