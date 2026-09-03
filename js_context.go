@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/net/publicsuffix"
@@ -66,6 +67,43 @@ type jsContextCandidateStats struct {
 	commonHits int
 }
 
+const maxJSContextFetchWorkers = 4
+
+// loadJSContextEvidenceBatch downloads external JS evidence with bounded
+// parallelism while preserving jsURLs order in the returned slice. Shared
+// cache entries make repeat callers (route extraction after context
+// discovery) effectively free.
+func (s *FingerScanner) loadJSContextEvidenceBatch(ctx context.Context, pageURL *url.URL, jsURLs []string) []jsContextEvidence {
+	evidence := make([]jsContextEvidence, len(jsURLs))
+	if len(jsURLs) == 0 || ctx.Err() != nil {
+		return evidence
+	}
+	workers := len(jsURLs)
+	if workers > maxJSContextFetchWorkers {
+		workers = maxJSContextFetchWorkers
+	}
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for index, jsURL := range jsURLs {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(index int, jsURL string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			evidence[index] = s.loadJSContextEvidence(ctx, pageURL, jsURL)
+		}(index, jsURL)
+	}
+	wg.Wait()
+	return evidence
+}
+
 func (s *FingerScanner) discoverJSContextPaths(ctx context.Context, pageURL *url.URL, htmlBody []byte) {
 	if s == nil || pageURL == nil || ctx.Err() != nil {
 		return
@@ -76,12 +114,7 @@ func (s *FingerScanner) discoverJSContextPaths(ctx context.Context, pageURL *url
 	for _, script := range inlineScripts {
 		evidence = append(evidence, extractJSContextEvidence(pageURL, []byte(script)))
 	}
-	for _, jsURL := range jsURLs {
-		if ctx.Err() != nil {
-			return
-		}
-		evidence = append(evidence, s.loadJSContextEvidence(ctx, pageURL, jsURL))
-	}
+	evidence = append(evidence, s.loadJSContextEvidenceBatch(ctx, pageURL, jsURLs)...)
 
 	s.storeJSContextPaths(pageURL, deriveJSContextPaths(evidence))
 }

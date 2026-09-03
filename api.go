@@ -71,13 +71,10 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 	restoreLogOutput := logger.Default.ConfigureWriter(s.logOutput)
 	defer restoreLogOutput()
 
-	needInitialLoadDiscovery := s.deepScan
-	if s.screenshot || needInitialLoadDiscovery {
+	if s.screenshot {
 		browser, err := newScreenshotBrowser(ctx, defaultScreenshotMaxTabs, s.proxy)
 		if err != nil {
-			if s.screenshot {
-				s.screenshot = false
-			}
+			s.screenshot = false
 			if s.shouldReportScreenshotDiagnostics() {
 				logger.Default.Warning("[headless] init browser failed, continue with static JS context fallback: %v", err)
 			}
@@ -94,8 +91,7 @@ func (s *FingerScanner) Scan(ctx context.Context, callback ResultCallback) error
 
 	s.FingerScan(ctx, callback)
 	if s.deepScan {
-		s.discoverDynamicContextPaths(ctx)
-		s.scanDiscoveredRequestFingerprints(ctx, callback)
+		s.discoverPageContextPaths(ctx)
 		s.scanDiscoveredPages(ctx, callback)
 		s.HostTokenPathProbe(ctx, callback)
 		s.ActiveFingerScan(ctx, callback)

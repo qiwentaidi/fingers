@@ -3,7 +3,6 @@ package fingers
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"path"
@@ -13,20 +12,17 @@ import (
 	"sync"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/qiwentaidi/fingers/internal/logger"
 )
 
 const (
-	maxDiscoveredPagesPerTarget = 12
-	defaultPageDiscoveryWorkers = 5
+	maxDiscoveredPagesPerTarget  = 12
+	defaultPageDiscoveryWorkers  = 5
+	maxDiscoveredPageScanThreads = 16
 )
 
 const (
-	discoveredLinkDetect     = "DiscoveredLink"
-	renderedDOMDetect        = "RenderedDOM"
-	apiResponseDetect        = "APIResponse"
-	apiResponseContextDetect = "APIResponseContext"
-	jsRouteDetect            = "JSRoute"
+	discoveredLinkDetect = "DiscoveredLink"
+	jsRouteDetect        = "JSRoute"
 )
 
 var (
@@ -58,11 +54,7 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 		return
 	}
 
-	stage := "dynamic"
-	if s.screenshotBrowser != nil {
-		stage = "headless"
-	}
-	progress := newScanProgress(stage, len(targets), s.shouldPrintDefaultOutput())
+	progress := newScanProgress("page-discovery", len(targets), s.shouldPrintDefaultOutput())
 	defer progress.Finish()
 
 	workers := pageDiscoveryWorkerCount(len(targets))
@@ -131,9 +123,8 @@ func (s *FingerScanner) discoverPageCandidateTarget(ctx context.Context, target 
 		progress.Skipped()
 		return
 	}
+
 	if len(target.Body) > 0 {
-		// Static JS context evidence and page routes complement browser
-		// evidence; neither source suppresses the other.
 		s.discoverJSContextPaths(ctx, target.URL, target.Body)
 		for _, raw := range extractHTMLPageReferences(target.Body) {
 			s.storePageCandidate(target.URL, raw, discoveredLinkDetect)
@@ -141,53 +132,10 @@ func (s *FingerScanner) discoverPageCandidateTarget(ctx context.Context, target 
 		for _, raw := range s.extractJSPageReferences(ctx, target.URL, target.Body) {
 			s.storePageCandidate(target.URL, raw, jsRouteDetect)
 		}
-	}
-
-	if s.screenshotBrowser == nil {
-		if len(target.Body) > 0 {
-			progress.Matched()
-		} else {
-			progress.Skipped()
-		}
+		progress.Matched()
 		return
 	}
-	progress.Requested()
-	capture, err := s.screenshotBrowser.CapturePageLoad(ctx, target.URL.String())
-	if err != nil && s.shouldPrintDefaultOutput() {
-		logger.Default.Debug("[headless] capture page candidates for %s partially failed: %v", target.URL, err)
-	}
-	if err != nil {
-		progress.Failed()
-	} else {
-		progress.Matched()
-	}
-	s.storeDiscoveredRequests(target.URL, capture.APIRequests)
-	dynamicPaths := make([]string, 0, len(capture.RequestURLs))
-	for _, raw := range capture.RequestURLs {
-		requestURL, parseErr := url.Parse(raw)
-		if parseErr != nil || !sameContextURL(target.URL, requestURL) {
-			continue
-		}
-		dynamicPaths = append(dynamicPaths, requestURL.Path)
-	}
-	s.storeJSContextPaths(target.URL, deriveAPIContextPaths(dynamicPaths))
-	for _, raw := range capture.DOMURLs {
-		s.storePageCandidate(target.URL, raw, renderedDOMDetect)
-	}
-	for _, response := range capture.APIResponses {
-		responseURL, parseErr := url.Parse(response.URL)
-		if parseErr != nil || !sameContextURL(target.URL, responseURL) {
-			continue
-		}
-		for _, raw := range extractJSONPageReferences(response.Body) {
-			// A root-relative route in an API response belongs to the document
-			// origin, not necessarily the API subdomain that returned it.
-			s.storePageCandidate(target.URL, raw, apiResponseDetect)
-			for _, contextPath := range derivePageContextReferences(target.URL, raw) {
-				s.storePageCandidate(target.URL, contextPath, apiResponseContextDetect)
-			}
-		}
-	}
+	progress.Skipped()
 }
 
 func extractHTMLPageReferences(body []byte) []string {
@@ -227,37 +175,9 @@ func (s *FingerScanner) extractJSPageReferences(ctx context.Context, pageURL *ur
 	for _, script := range inlineScripts {
 		refs = append(refs, extractJSContextEvidence(pageURL, []byte(script)).routes...)
 	}
-	for _, jsURL := range jsURLs {
-		if ctx.Err() != nil {
-			return refs
-		}
-		refs = append(refs, s.loadJSContextEvidence(ctx, pageURL, jsURL).routes...)
+	for _, item := range s.loadJSContextEvidenceBatch(ctx, pageURL, jsURLs) {
+		refs = append(refs, item.routes...)
 	}
-	return refs
-}
-
-func extractJSONPageReferences(body []byte) []string {
-	var value any
-	if err := json.Unmarshal(body, &value); err != nil {
-		return nil
-	}
-	refs := make([]string, 0)
-	var visit func(any)
-	visit = func(current any) {
-		switch item := current.(type) {
-		case map[string]any:
-			for _, child := range item {
-				visit(child)
-			}
-		case []any:
-			for _, child := range item {
-				visit(child)
-			}
-		case string:
-			refs = append(refs, pageReferencePattern.FindAllString(item, -1)...)
-		}
-	}
-	visit(value)
 	return refs
 }
 
@@ -374,12 +294,6 @@ func isDiscoverablePagePath(candidatePath string) bool {
 
 func pageCandidateSourceScore(detect string) int {
 	switch detect {
-	case apiResponseDetect:
-		return 100
-	case apiResponseContextDetect:
-		return 120
-	case renderedDOMDetect:
-		return 80
 	case discoveredLinkDetect:
 		return 60
 	case jsRouteDetect:
@@ -440,8 +354,8 @@ func (s *FingerScanner) scanDiscoveredPages(ctx context.Context, callback Result
 	}
 	if len(targets) > 0 {
 		threads := s.thread
-		if threads > 4 {
-			threads = 4
+		if threads > maxDiscoveredPageScanThreads {
+			threads = maxDiscoveredPageScanThreads
 		}
 		s.fingerScanTargets(ctx, callback, targets, threads, "discovered-page")
 	}
