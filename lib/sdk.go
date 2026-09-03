@@ -21,17 +21,23 @@ type ResultCallback = root.ResultCallback
 
 // Re-export core configuration and result types for SDK users.
 type (
-	Options               = root.Options
-	Result                = root.Result
-	FingerprintMatch      = root.FingerprintMatch
-	FingerprintExtraction = root.FingerprintExtraction
-	Tag                   = root.Tag
-	VulnFingerprint       = root.VulnFingerprint
-	StorageMode           = root.StorageMode
-	LocalStorageConfig    = root.LocalStorageConfig
-	AliyunOSSConfig       = root.AliyunOSSConfig
-	AssetStorageConfig    = root.AssetStorageConfig
+	Options                  = root.Options
+	Result                   = root.Result
+	DiscoveredRequest        = root.DiscoveredRequest
+	DiscoveredRequestBuilder = root.DiscoveredRequestBuilder
+	FingerprintMatch         = root.FingerprintMatch
+	FingerprintExtraction    = root.FingerprintExtraction
+	Tag                      = root.Tag
+	VulnFingerprint          = root.VulnFingerprint
+	StorageMode              = root.StorageMode
+	LocalStorageConfig       = root.LocalStorageConfig
+	AliyunOSSConfig          = root.AliyunOSSConfig
+	AssetStorageConfig       = root.AssetStorageConfig
 )
+
+func NewDiscoveredRequestBuilder(target string) *DiscoveredRequestBuilder {
+	return root.NewDiscoveredRequestBuilder(target)
+}
 
 const (
 	StorageModeLocal     = root.StorageModeLocal
