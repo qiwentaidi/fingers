@@ -96,6 +96,7 @@ type Options struct {
 	DeepScan              bool
 	RootPath              bool
 	ActiveTimeoutLimit    int
+	ActivePathsCap        int // 每个 origin 最多生成的活动指纹路径任务数,<=0 用默认值
 	EnableScreenshot      bool
 	ScreenshotDiagnostics bool
 	EnableAssetTagProbe   bool

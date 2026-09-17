@@ -122,6 +122,15 @@ func WithActiveTimeoutLimit(limit int) FingersSDKOptions {
 	}
 }
 
+// WithActivePathsCap 设置每个 origin 最多生成的活动指纹路径任务数(<=0 使用默认值)。
+// 活动 path 任务量随「token 路径数 × 活动指纹路径数」乘法增长,大批量目标下必须封顶。
+func WithActivePathsCap(cap int) FingersSDKOptions {
+	return func(opts *root.Options) error {
+		opts.ActivePathsCap = cap
+		return nil
+	}
+}
+
 func WithScreenshot(enabled bool) FingersSDKOptions {
 	return func(opts *root.Options) error {
 		opts.EnableScreenshot = enabled

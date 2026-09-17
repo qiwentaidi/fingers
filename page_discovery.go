@@ -54,7 +54,7 @@ func (s *FingerScanner) discoverPageCandidates(ctx context.Context) {
 		return
 	}
 
-	progress := newScanProgress("page-discovery", len(targets), s.shouldPrintDefaultOutput())
+	progress := newScanProgress("page-discovery", len(targets), s.progressEnabled())
 	defer progress.Finish()
 
 	workers := pageDiscoveryWorkerCount(len(targets))

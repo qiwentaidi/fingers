@@ -23,9 +23,16 @@ const (
 	hostTokenPathProbeTimeout = 5
 	hostTokenPathDetectName   = "HostTokenPath"
 	hostTokenActivePathName   = "HostTokenActivePath"
-	// maxActivePathsPerOrigin 每个 origin 最多生成的活动指纹路径任务数。
-	maxActivePathsPerOrigin = 20
+	// defaultActivePathsPerOrigin 每个 origin 最多生成的活动指纹路径任务数(未被
+	// WithActivePathsCap 覆盖时的默认值)。
+	defaultActivePathsPerOrigin = 20
 )
+
+// isGatewayFailureStatus 判定 token 路径响应是否为网关/服务端级故障:
+// 5xx、408(服务端请求超时)、429(限流)。此状态下更深的指纹路径必然同样失败。
+func isGatewayFailureStatus(statusCode int) bool {
+	return statusCode >= 500 || statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests
+}
 
 var ignoredHostTokenPathTokens = map[string]struct{}{
 	"localhost": {},
@@ -230,11 +237,12 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 			}
 		}
 
-		// Gateway-level 5xx (502/504 and friends): the gateway itself is failing,
-		// so deeper fingerprint paths are guaranteed to fail the same way. Fanning
-		// out on them only manufactures dead tasks; with large target lists full
-		// of slow gateways that degrades to tasks x probe-timeout of wasted work.
-		if probeResult.probed && probeResult.entryStatus >= 500 {
+		// Gateway-level failures (5xx, 408 server-side timeout, 429 rate limit):
+		// the gateway itself is failing, so deeper fingerprint paths are guaranteed
+		// to fail the same way. Fanning out on them only manufactures dead tasks;
+		// with large target lists full of slow gateways that degrades to
+		// tasks x probe-timeout of wasted work.
+		if probeResult.probed && isGatewayFailureStatus(probeResult.entryStatus) {
 			continue
 		}
 
@@ -259,7 +267,7 @@ func (s *FingerScanner) probeHostTokenPaths(ctx context.Context, tasks []hostTok
 
 	var wg sync.WaitGroup
 	retChan := make(chan hostTokenPathProbeResult, len(tasks))
-	progress := newScanProgress("host-token", len(tasks), s.shouldPrintDefaultOutput())
+	progress := newScanProgress("host-token", len(tasks), s.progressEnabled())
 	defer progress.Finish()
 	thread := s.thread
 	if thread <= 0 {
@@ -316,7 +324,7 @@ func (s *FingerScanner) probeHostTokenActivePaths(ctx context.Context, tasks []h
 		result Result
 		known  []string
 	}, len(tasks))
-	progress := newScanProgress("host-token-active", len(tasks), s.shouldPrintDefaultOutput())
+	progress := newScanProgress("host-token-active", len(tasks), s.progressEnabled())
 	defer progress.Finish()
 	thread := s.thread
 	if thread <= 0 {
@@ -400,6 +408,10 @@ func (s *FingerScanner) hostTokenActivePathProbeTasks(prefixTasks []hostTokenPat
 	if len(prefixTasks) == 0 || len(activePathMap) == 0 {
 		return nil
 	}
+	activePathsCap := s.activePathsCap
+	if activePathsCap <= 0 {
+		activePathsCap = defaultActivePathsPerOrigin
+	}
 
 	// 路径按「覆盖指纹数」降序排序,保证 per-origin 封顶时优先保留信息量最大的路径。
 	paths := make([]string, 0, len(activePathMap))
@@ -422,7 +434,7 @@ func (s *FingerScanner) hostTokenActivePathProbeTasks(prefixTasks []hostTokenPat
 		for _, path := range paths {
 			// per-origin 封顶:活动路径任务量随「token 路径数 × 活动指纹路径数」乘法增长,
 			// 不设上限时大批量目标下会爆出数十万任务,拖垮整个阶段。
-			if generatedPerOrigin[originKey] >= maxActivePathsPerOrigin {
+			if generatedPerOrigin[originKey] >= activePathsCap {
 				break
 			}
 			fingers := activePathMap[path]

@@ -49,6 +49,7 @@ type FingerScanner struct {
 	fingerprintRepo       *FingerprintRepository
 	aliveURLs             []*url.URL // 默认指纹扫描结束后，存活的URL，以便后续主动指纹过滤目标
 	activeTimeoutLimit    int        // 主动指纹扫描超时超过该次数就不再扫描该目标
+	activePathsCap        int        // 每个 origin 最多生成的活动指纹路径任务数
 	thread                int        // 指纹线程
 	deepScan              bool       // 代表主动指纹探测
 	rootPath              bool       // 主动指纹是否采取根路径扫描
@@ -116,6 +117,7 @@ func newFingerScanner(options Options, repo *FingerprintRepository, faviconStore
 		deepScan:                 options.DeepScan,
 		rootPath:                 options.RootPath,
 		activeTimeoutLimit:       options.ActiveTimeoutLimit,
+		activePathsCap:           options.ActivePathsCap,
 		screenshot:               options.EnableScreenshot,
 		screenshotDiagnostics:    options.ScreenshotDiagnostics,
 		enableAssetTagProbe:      options.EnableAssetTagProbe,
@@ -184,6 +186,12 @@ func normalizeWrappedProtocolTarget(raw string) string {
 
 func (s *FingerScanner) shouldPrintDefaultOutput() bool {
 	return s != nil && s.enableDefaultOutput
+}
+
+// progressEnabled 阶段进度是否输出:默认输出开启,或调用方注入了 LogOutput
+// (注入 writer 即表达"要看 SDK 内部日志",进度行不应再被静默)。
+func (s *FingerScanner) progressEnabled() bool {
+	return s != nil && (s.enableDefaultOutput || s.logOutput != nil)
 }
 
 func (s *FingerScanner) shouldReportScreenshotDiagnostics() bool {
@@ -279,7 +287,7 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 	var wg sync.WaitGroup
 	single := make(chan struct{})
 	count := len(targets)
-	progress := newScanProgress(stage, count, s.shouldPrintDefaultOutput())
+	progress := newScanProgress(stage, count, s.progressEnabled())
 	defer progress.Finish()
 	retChan := make(chan Result, count)
 	go func() {
@@ -606,7 +614,7 @@ func (s *FingerScanner) ActiveFingerScan(ctx context.Context, callback ResultCal
 	single := make(chan struct{})
 	retChan := make(chan Result, len(s.urls))
 	count := s.ActiveCounts()
-	progress := newScanProgress("active", count, s.shouldPrintDefaultOutput())
+	progress := newScanProgress("active", count, s.progressEnabled())
 	defer progress.Finish()
 
 	go func() {
