@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 
@@ -22,6 +23,8 @@ const (
 	hostTokenPathProbeTimeout = 5
 	hostTokenPathDetectName   = "HostTokenPath"
 	hostTokenActivePathName   = "HostTokenActivePath"
+	// maxActivePathsPerOrigin 每个 origin 最多生成的活动指纹路径任务数。
+	maxActivePathsPerOrigin = 20
 )
 
 var ignoredHostTokenPathTokens = map[string]struct{}{
@@ -227,6 +230,14 @@ func (s *FingerScanner) HostTokenPathProbe(ctx context.Context, callback ResultC
 			}
 		}
 
+		// Gateway-level 5xx (502/504 and friends): the gateway itself is failing,
+		// so deeper fingerprint paths are guaranteed to fail the same way. Fanning
+		// out on them only manufactures dead tasks; with large target lists full
+		// of slow gateways that degrades to tasks x probe-timeout of wasted work.
+		if probeResult.probed && probeResult.entryStatus >= 500 {
+			continue
+		}
+
 		// Preserve the important existing behavior for hard 404s and uncertain
 		// responses: a missing context root can still contain a real application
 		// at a deeper fingerprint path.
@@ -390,11 +401,31 @@ func (s *FingerScanner) hostTokenActivePathProbeTasks(prefixTasks []hostTokenPat
 		return nil
 	}
 
+	// 路径按「覆盖指纹数」降序排序,保证 per-origin 封顶时优先保留信息量最大的路径。
+	paths := make([]string, 0, len(activePathMap))
+	for path := range activePathMap {
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		if len(activePathMap[paths[i]]) != len(activePathMap[paths[j]]) {
+			return len(activePathMap[paths[i]]) > len(activePathMap[paths[j]])
+		}
+		return paths[i] < paths[j]
+	})
+
 	seen := make(map[string]struct{})
+	generatedPerOrigin := make(map[string]int)
 	tasks := make([]hostTokenActivePathProbeTask, 0)
 	for _, prefixTask := range prefixTasks {
 		base := buildHostTokenPathURL(prefixTask.base, prefixTask.path)
-		for path, fingers := range activePathMap {
+		originKey := hostTokenOriginKey(base)
+		for _, path := range paths {
+			// per-origin 封顶:活动路径任务量随「token 路径数 × 活动指纹路径数」乘法增长,
+			// 不设上限时大批量目标下会爆出数十万任务,拖垮整个阶段。
+			if generatedPerOrigin[originKey] >= maxActivePathsPerOrigin {
+				break
+			}
+			fingers := activePathMap[path]
 			if len(fingers) == 0 {
 				continue
 			}
@@ -403,6 +434,7 @@ func (s *FingerScanner) hostTokenActivePathProbeTasks(prefixTasks []hostTokenPat
 				continue
 			}
 			seen[fullURL] = struct{}{}
+			generatedPerOrigin[originKey]++
 			tasks = append(tasks, hostTokenActivePathProbeTask{
 				base:              base,
 				path:              path,
