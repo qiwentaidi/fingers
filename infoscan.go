@@ -461,6 +461,9 @@ func (s *FingerScanner) fingerScanTargets(ctrlCtx context.Context, callback Resu
 		}
 
 		fingerprints := Scan(web, s.fingerprintRepo.GetFingerprintDB())
+		// 404 响应剔除"靠错误页命中的框架指纹"(如 SpringBoot whitelabel / 404 JSON),
+		// 否则每个 404 子路径都会被打上框架标签,形成噪声。
+		fingerprints = filterFrameworkNoiseOn404(web.StatusCode, fingerprints)
 
 		// if s.FastjsonScan(u) {
 		// 	fingerprints = append(fingerprints, "Fastjson")

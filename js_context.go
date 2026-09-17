@@ -116,7 +116,9 @@ func (s *FingerScanner) discoverJSContextPaths(ctx context.Context, pageURL *url
 	}
 	evidence = append(evidence, s.loadJSContextEvidenceBatch(ctx, pageURL, jsURLs)...)
 
-	s.storeJSContextPaths(pageURL, deriveJSContextPaths(evidence))
+	// 晋升为主动探测 base 前先验活:死路径(404/连不上)与 catch-all 壳子路径剔除,
+	// 1 次验活换掉后续 N 次必败的指纹探测。
+	s.storeJSContextPaths(pageURL, s.filterCatchAllContextPaths(ctx, pageURL, deriveJSContextPaths(evidence)))
 }
 
 func extractPageJSSources(pageURL *url.URL, htmlBody []byte) ([]string, []string) {
@@ -563,7 +565,12 @@ func (s *FingerScanner) contextPathsForTarget(target *url.URL) []string {
 	}
 	s.jsContextMutex.Lock()
 	defer s.jsContextMutex.Unlock()
-	return append([]string(nil), s.jsContextPaths[contextOriginKey(target)]...)
+	paths := append([]string(nil), s.jsContextPaths[contextOriginKey(target)]...)
+	// context 路径会进入主动指纹的「context 路径 × 指纹专属路径」乘法,封顶防爆炸。
+	if len(paths) > defaultContextPathsPerOrigin {
+		paths = paths[:defaultContextPathsPerOrigin]
+	}
+	return paths
 }
 
 func buildContextBaseURL(target *url.URL, contextPath string) *url.URL {
