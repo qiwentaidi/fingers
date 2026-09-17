@@ -652,29 +652,88 @@ func newHostTokenResponseFingerprint(contentType string, body []byte, contentLen
 	}
 }
 
+// hostTokenSoft404Baselines 对每个 distinct origin 预探测一个随机不存在路径,
+// 拿其响应指纹作为该 origin 的 soft-404 基线(后续真实路径响应与基线一致 → catch-all 壳子)。
+// 并发执行:大批量目标下逐 origin 串行探测会退化为 origin 数 × 探测超时的串行等待。
 func (s *FingerScanner) hostTokenSoft404Baselines(ctx context.Context, tasks []hostTokenPathProbeTask) map[string]hostTokenResponseFingerprint {
 	baselines := make(map[string]hostTokenResponseFingerprint)
+	// 先去重出待探测的 base,避免并发下重复打同一 origin
+	seen := make(map[string]struct{})
+	bases := make([]*url.URL, 0, len(tasks))
 	for _, task := range tasks {
-		if ctx.Err() != nil || task.base == nil {
-			break
+		if task.base == nil {
+			continue
 		}
 		origin := hostTokenOriginKey(task.base)
-		if _, exists := baselines[origin]; exists {
+		if _, exists := seen[origin]; exists {
 			continue
 		}
-		probeURL := buildHostTokenPathURL(task.base, hostTokenSoft404ProbePath())
+		seen[origin] = struct{}{}
+		bases = append(bases, task.base)
+	}
+	if len(bases) == 0 {
+		return baselines
+	}
+
+	thread := s.thread
+	if thread <= 0 {
+		thread = 1
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	pool, err := ants.NewPoolWithFunc(thread, func(raw interface{}) {
+		defer wg.Done()
+		if ctx.Err() != nil {
+			return
+		}
+		base := raw.(*url.URL)
+		probeURL := buildHostTokenPathURL(base, hostTokenSoft404ProbePath())
 		resp, err := clients.DoRequest("GET", probeURL.String(), s.headers, nil, hostTokenPathProbeTimeout, s.client)
 		if err != nil || resp == nil || !isHostTokenPathProbeStatus(resp.StatusCode()) {
-			continue
+			return
 		}
 		responseBody := resp.Body()
 		body := httputil.LimitResponseBytes(responseBody, maxInfoReponseSize)
 		// Empty success responses are too weak a signal to prune a candidate.
 		if len(body) == 0 {
-			continue
+			return
 		}
-		baselines[origin] = newHostTokenResponseFingerprint(resp.Header().Get("Content-Type"), body, len(responseBody))
+		mu.Lock()
+		baselines[hostTokenOriginKey(base)] = newHostTokenResponseFingerprint(resp.Header().Get("Content-Type"), body, len(responseBody))
+		mu.Unlock()
+	})
+	if err != nil {
+		// 池创建失败退回串行,功能不丢
+		for _, base := range bases {
+			if ctx.Err() != nil {
+				break
+			}
+			probeURL := buildHostTokenPathURL(base, hostTokenSoft404ProbePath())
+			resp, err := clients.DoRequest("GET", probeURL.String(), s.headers, nil, hostTokenPathProbeTimeout, s.client)
+			if err != nil || resp == nil || !isHostTokenPathProbeStatus(resp.StatusCode()) {
+				continue
+			}
+			responseBody := resp.Body()
+			body := httputil.LimitResponseBytes(responseBody, maxInfoReponseSize)
+			if len(body) == 0 {
+				continue
+			}
+			baselines[hostTokenOriginKey(base)] = newHostTokenResponseFingerprint(resp.Header().Get("Content-Type"), body, len(responseBody))
+		}
+		return baselines
 	}
+	defer pool.Release()
+
+	for _, base := range bases {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		if err := pool.Invoke(base); err != nil {
+			wg.Done()
+		}
+	}
+	wg.Wait()
 	return baselines
 }
 
